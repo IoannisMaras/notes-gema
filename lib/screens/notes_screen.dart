@@ -1,0 +1,371 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
+
+import '../models/note.dart';
+import '../models/pending_change.dart';
+import '../models/voice_message.dart';
+import '../services/gemma_service.dart';
+import '../services/notes_service.dart';
+import '../widgets/ai_chat_panel.dart';
+import '../widgets/ascii_bot.dart';
+import '../widgets/terminal_notes_controller.dart';
+
+class NotesScreen extends StatefulWidget {
+  final Note note;
+  const NotesScreen({super.key, required this.note});
+
+  @override
+  State<NotesScreen> createState() => _NotesScreenState();
+}
+
+class _NotesScreenState extends State<NotesScreen> {
+  // ── Controllers & services ─────────────────────────────────────────────────
+  final TerminalNotesController _noteController = TerminalNotesController();
+  final TextEditingController _cmdController = TextEditingController();
+  final FocusNode _cmdFocusNode = FocusNode();
+  final ScrollController _chatScrollController = ScrollController();
+  final _notesService = NotesService();
+  final _gemmaService = GemmaService();
+
+  // ── Audio ──────────────────────────────────────────────────────────────────
+  final AudioRecorder _recorder = AudioRecorder();
+  bool _isRecording = false;
+  List<double> _liveAmplitudes = [];
+  StreamSubscription? _ampSubscription;
+  Timer? _countdownTimer;
+  int _recordCountdown = 10;
+
+  // ── UI state ───────────────────────────────────────────────────────────────
+  bool _isProcessing = false;
+  bool _showAiChat = false;
+  final List<dynamic> _chatLog = [];
+
+  // ── Bot bubble position ────────────────────────────────────────────────────
+  double _botLeft = 0.0;
+  double _botTop = 0.0;
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+  @override
+  void initState() {
+    super.initState();
+    _noteController.text = widget.note.content;
+    _noteController.addListener(_onNoteChanged);
+    // Position the bot bubble at the right-center after layout
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        final size = MediaQuery.of(context).size;
+        const bubbleWidth = 90.0;
+        const margin = 12.0;
+        setState(() {
+          _botLeft = size.width - bubbleWidth - margin;
+          _botTop = (size.height / 2) - 30;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _cmdFocusNode.dispose();
+    _noteController.dispose();
+    _cmdController.dispose();
+    _ampSubscription?.cancel();
+    _countdownTimer?.cancel();
+    _recorder.dispose();
+    _chatScrollController.dispose();
+    super.dispose();
+  }
+
+  // ── Note persistence ───────────────────────────────────────────────────────
+
+  void _onNoteChanged() {
+    final note = widget.note;
+    note.content = _noteController.text;
+    final lines = note.content.split('\n');
+    if (lines.isNotEmpty && lines.first.trim().isNotEmpty) {
+      String firstLine = lines.first.trim();
+      if (firstLine.length > 20) firstLine = firstLine.substring(0, 20);
+      firstLine = firstLine.replaceAll(RegExp(r'[^a-zA-Z0-9\s]'), '');
+      note.title = '$firstLine.txt';
+    } else {
+      note.title = 'untitled.txt';
+    }
+    note.updatedAt = DateTime.now();
+    _notesService.saveNote(note);
+  }
+
+  // ── Audio recording ────────────────────────────────────────────────────────
+
+  Future<void> _startRecording() async {
+    if (!await _recorder.hasPermission()) return;
+    final dir = await getTemporaryDirectory();
+    final path = '${dir.path}/command.wav';
+    await _recorder.start(
+      const RecordConfig(
+        encoder: AudioEncoder.wav,
+        sampleRate: 16000,
+        numChannels: 1,
+      ),
+      path: path,
+    );
+    setState(() {
+      _isRecording = true;
+      _liveAmplitudes = [];
+      _recordCountdown = 10;
+    });
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_recordCountdown > 0) {
+        setState(() => _recordCountdown--);
+      } else {
+        _stopRecording();
+      }
+    });
+    _ampSubscription = _recorder
+        .onAmplitudeChanged(const Duration(milliseconds: 80))
+        .listen((amp) {
+      setState(() {
+        double norm = (amp.current + 60) / 60;
+        if (norm < 0) norm = 0;
+        _liveAmplitudes.add(norm);
+        if (_liveAmplitudes.length > 50) _liveAmplitudes.removeAt(0);
+      });
+    });
+  }
+
+  Future<void> _stopRecording() async {
+    if (!_isRecording) return;
+    _countdownTimer?.cancel();
+    _ampSubscription?.cancel();
+    final path = await _recorder.stop();
+    setState(() {
+      _isRecording = false;
+      _recordCountdown = 10;
+    });
+    if (path != null) {
+      final bytes = await File(path).readAsBytes();
+      final ampsCopy = List<double>.from(_liveAmplitudes);
+      _runCommand(audioBytes: bytes, recordedAmplitudes: ampsCopy);
+    }
+    setState(() => _liveAmplitudes = []);
+  }
+
+  void _onMicPressed() {
+    if (_isRecording) {
+      _stopRecording();
+    } else {
+      _startRecording();
+    }
+  }
+
+  // ── AI command runner ──────────────────────────────────────────────────────
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_chatScrollController.hasClients) {
+        _chatScrollController.animateTo(
+          _chatScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  void _runCommand({Uint8List? audioBytes, List<double>? recordedAmplitudes}) {
+    final cmd = _cmdController.text.trim();
+    if (cmd.isEmpty && audioBytes == null) return;
+    _cmdController.clear();
+
+    setState(() {
+      _isProcessing = true;
+      if (audioBytes != null) {
+        _chatLog.add(VoiceMessage(recordedAmplitudes ?? []));
+      } else {
+        _chatLog.add('> USER: $cmd');
+      }
+      _scrollToBottom();
+    });
+
+    _gemmaService.runCommand(
+      textCommand: cmd,
+      audioBytes: audioBytes,
+      recordedAmplitudes: recordedAmplitudes,
+      getNoteText: () => _noteController.text,
+      onLog: (item) => setState(() => _chatLog.add(item)),
+      onLogUpdate: (index, item) => setState(() => _chatLog[index] = item),
+      onScrollToBottom: _scrollToBottom,
+      onPendingChange: (_) {},
+      onDone: () => setState(() => _isProcessing = false),
+      onError: (err) => setState(() => _chatLog.add(err)),
+      getLogLength: () => _chatLog.length,
+      getLogItem: (i) => _chatLog[i],
+      removeLastLog: () => setState(() {
+        if (_chatLog.isNotEmpty) _chatLog.removeLast();
+      }),
+    );
+  }
+
+  void _onAcceptChange(PendingChange change) {
+    setState(() {
+      if (change.isAppend) {
+        _noteController.text +=
+            (_noteController.text.isEmpty ? '' : '\n') + change.newText;
+      } else {
+        final current = _noteController.text;
+        final target =
+            current.contains(change.oldText) ? change.oldText : change.oldText.trim();
+        if (current.contains(target)) {
+          _noteController.text = current.replaceFirst(target, change.newText);
+        }
+      }
+    });
+  }
+
+  // ── Bot helpers ────────────────────────────────────────────────────────────
+
+  double _getCursorX() => _noteController.text.isEmpty ? 20 : 100.0;
+
+  double _getCursorY() {
+    if (_noteController.text.isEmpty) return 100;
+    final lines = _noteController.text.split('\n').length;
+    return (lines * 22.0).clamp(50.0, MediaQuery.of(context).size.height - 100);
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('root@gemma:~# nano ${widget.note.title}'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1.0),
+          child: Container(color: Colors.white38, height: 1.0),
+        ),
+      ),
+      body: Stack(
+        children: [
+          Column(
+            children: [
+              // Note editor
+              Expanded(child: _buildNoteEditor()),
+              // Sliding AI panel
+              AnimatedSize(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                child: _showAiChat
+                    ? SizedBox(
+                        height: MediaQuery.of(context).size.height * 0.45,
+                        child: AiChatPanel(
+                          isProcessing: _isProcessing,
+                          chatLog: _chatLog,
+                          scrollController: _chatScrollController,
+                          cmdController: _cmdController,
+                          cmdFocusNode: _cmdFocusNode,
+                          isRecording: _isRecording,
+                          recordCountdown: _recordCountdown,
+                          liveAmplitudes: _liveAmplitudes,
+                          onMicPressed: _onMicPressed,
+                          onSendPressed: () => _runCommand(),
+                          onNoteAccept: _onAcceptChange,
+                          onNoteReject: () {},
+                        ),
+                      )
+                    : const SizedBox(width: double.infinity, height: 0),
+              ),
+            ],
+          ),
+          // Draggable bot bubble
+          _buildBotBubble(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoteEditor() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: TextField(
+        onTap: () => setState(() => _showAiChat = false),
+        controller: _noteController,
+        maxLines: null,
+        expands: true,
+        style: const TextStyle(
+          color: Colors.white,
+          fontFamily: 'Courier',
+          fontSize: 16,
+        ),
+        decoration: const InputDecoration(
+          border: InputBorder.none,
+          hintText:
+              '// type your notes here...\n// use the floating robot to interact with AI.',
+          hintStyle: TextStyle(color: Colors.white38),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBotBubble() {
+    return Positioned(
+      left: _botLeft,
+      top: _botTop,
+      child: GestureDetector(
+        onTap: () {
+          final size = MediaQuery.of(context).size;
+          const bubbleWidth = 90.0;
+          const margin = 12.0;
+          setState(() {
+            _showAiChat = !_showAiChat;
+            if (_showAiChat) {
+              // Snap to top-right so the bot sits above the panel
+              _botLeft = size.width - bubbleWidth - margin;
+              _botTop = margin;
+              _cmdFocusNode.requestFocus();
+            }
+          });
+        },
+        onPanUpdate: (details) {
+          final size = MediaQuery.of(context).size;
+          const bubbleSize = 90.0;
+          setState(() {
+            _botLeft = (_botLeft + details.delta.dx)
+                .clamp(0.0, size.width - bubbleSize);
+            _botTop = (_botTop + details.delta.dy)
+                .clamp(0.0, size.height - bubbleSize - 56.0);
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: Colors.greenAccent.withValues(alpha: 0.4),
+              width: 1.5,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.greenAccent.withValues(alpha: 0.1),
+                blurRadius: 10,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: AsciiBot(
+            state: _isProcessing ? BotState.thinking : BotState.awake,
+            botX: _botLeft,
+            botY: _botTop,
+            targetX: _getCursorX(),
+            targetY: _getCursorY(),
+          ),
+        ),
+      ),
+    );
+  }
+}

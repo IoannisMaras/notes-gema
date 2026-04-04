@@ -1,3 +1,4 @@
+
 class Note {
   final String id;
   String title;

@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   flutter_gemma
+  record_windows
   speech_to_text_windows
 )
 
