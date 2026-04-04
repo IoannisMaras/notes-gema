@@ -3,12 +3,72 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'dart:io' show Platform;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await FlutterGemma.initialize();
   runApp(const MyApp());
+}
+
+class ToolExecutionSpinner {
+  final String message;
+  ToolExecutionSpinner(this.message);
+}
+
+class AsciiLoader extends StatefulWidget {
+  final String message;
+  const AsciiLoader({super.key, required this.message});
+
+  @override
+  State<AsciiLoader> createState() => _AsciiLoaderState();
+}
+
+class _AsciiLoaderState extends State<AsciiLoader> {
+  late Timer _timer;
+  int _ticks = 0;
+  final _frames = const [
+    '[=   ]',
+    '[==  ]',
+    '[=== ]',
+    '[ ===]',
+    '[  ==]',
+    '[   =]',
+    '[  ==]',
+    '[ ===]',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 150), (_) {
+      if (mounted) {
+        setState(() {
+          _ticks++;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      "> ${widget.message} ${_frames[_ticks % _frames.length]}",
+      style: const TextStyle(
+        color: Colors.greenAccent,
+        fontFamily: 'Courier',
+        fontWeight: FontWeight.bold,
+      ),
+    );
+  }
 }
 
 class PendingChange {
@@ -329,9 +389,24 @@ class _BootScreenState extends State<BootScreen> {
   bool _isExhausted = true;
   double _progress = 0.0;
 
-  // High-parametric NPU target
-  final String modelUrl =
-      "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm";
+  // Platform-optimal models
+  String get modelUrl {
+    if (kIsWeb) {
+      // Web requires web-specific .task or .litertlm
+      return "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm";
+    } else if (Platform.isIOS) {
+      // iOS requires MediaPipe .task models (CPU/GPU)
+      // Using Gemma 3 as fallback since Gemma 4 .task is not widely hosted yet
+      return "https://huggingface.co/google/gemma-3-2b-it/resolve/main/gemma-3-2b-it-gpu-int8.task";
+    } else if (Platform.isAndroid) {
+      // Android can use NPU with .litertlm, but .task is safer for general GPU
+      // Leaving Gemma 4 since we target NPU, but could fall back to .task if NPU fails
+      return "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm";
+    } else {
+      // Desktop platforms (Windows, macOS, Linux) require .litertlm
+      return "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm";
+    }
+  }
 
   @override
   void initState() {
@@ -371,7 +446,7 @@ class _BootScreenState extends State<BootScreen> {
 
       _log("> downloading valid Gemma artifact...");
 
-      await FlutterGemma.installModel(modelType: ModelType.general)
+      await FlutterGemma.installModel(modelType: ModelType.gemmaIt)
           .fromNetwork(
             modelUrl,
             // token: "YOUR_HUGGING_FACE_TOKEN", // ⚠️ UNCOMMENT REQUIRED FOR OFFICIAL GATED MODELS
@@ -393,7 +468,7 @@ class _BootScreenState extends State<BootScreen> {
 
       _log("> pre-warming model context...");
       await FlutterGemma.getActiveModel(
-        maxTokens: 2056,
+        maxTokens: 10000,
         preferredBackend: PreferredBackend.gpu,
       );
 
@@ -608,6 +683,7 @@ class NotesScreen extends StatefulWidget {
 class _NotesScreenState extends State<NotesScreen> {
   final TerminalNotesController _noteController = TerminalNotesController();
   final TextEditingController _cmdController = TextEditingController();
+  final FocusNode _cmdFocusNode = FocusNode();
   bool _isProcessing = false;
   bool _showAiChat = false;
   final List<dynamic> _chatLog = [];
@@ -621,6 +697,14 @@ class _NotesScreenState extends State<NotesScreen> {
     super.initState();
     _noteController.text = widget.note.content;
     _noteController.addListener(_onNoteChanged);
+  }
+
+  @override
+  void dispose() {
+    _cmdFocusNode.dispose();
+    _noteController.dispose();
+    _cmdController.dispose();
+    super.dispose();
   }
 
   void _onNoteChanged() {
@@ -684,13 +768,13 @@ class _NotesScreenState extends State<NotesScreen> {
     });
 
     try {
-      final model = await FlutterGemma.getActiveModel(maxTokens: 2500);
+      final model = await FlutterGemma.getActiveModel(maxTokens: 10000);
       final fullText = _noteController.text;
-      final contextText = fullText.length > 200
-          ? "...\\n" + fullText.substring(fullText.length - 200)
+      final contextText = fullText.length > 2000
+          ? "...\\n" + fullText.substring(fullText.length - 2000)
           : fullText;
       final prompt =
-          "Role: AI Notes Agent. Tools: [read_lines, edit_content]. Rule: Always use tools for edits. Snapshot: $contextText. Command: $cmd";
+          "Role: AI Notes Agent. Tools: [read_lines, replace_lines, append_content]. Rule: ALWAYS reply with text OR use a tool. Use read_lines to see line numbers, then replace_lines to edit. Never output empty string. Snapshot: $contextText. Command: $cmd";
 
       final tools = [
         Tool(
@@ -705,8 +789,23 @@ class _NotesScreenState extends State<NotesScreen> {
           },
         ),
         Tool(
+          name: 'replace_lines',
+          description:
+              'Replace a block of lines. start_line and end_line are 1-indexed (inclusive).',
+          parameters: {
+            'type': 'object',
+            'properties': {
+              'start_line': {'type': 'integer'},
+              'end_line': {'type': 'integer'},
+              'new_text': {'type': 'string'},
+            },
+            'required': ['start_line', 'end_line', 'new_text'],
+          },
+        ),
+        Tool(
           name: 'edit_content',
-          description: 'Edit text. Empty old_text appends.',
+          description:
+              'Alternative: replace text by exact matching if line numbers unknown.',
           parameters: {
             'type': 'object',
             'properties': {
@@ -716,12 +815,22 @@ class _NotesScreenState extends State<NotesScreen> {
             'required': ['old_text', 'new_text'],
           },
         ),
+        Tool(
+          name: 'append_content',
+          description: 'Append text to the end of currently open note.',
+          parameters: {
+            'type': 'object',
+            'properties': {
+              'content': {'type': 'string'},
+            },
+            'required': ['content'],
+          },
+        ),
       ];
 
       final session = await model.createChat(
         tools: tools,
         supportsFunctionCalls: true,
-        modelType: ModelType.general,
       );
       await session.addQueryChunk(Message.text(text: prompt, isUser: true));
 
@@ -730,22 +839,42 @@ class _NotesScreenState extends State<NotesScreen> {
 
       while (isRunning && iterations < 5) {
         iterations++;
+        setState(() {
+          _chatLog.add(
+            ToolExecutionSpinner(
+              iterations == 1 ? "PROCESSING" : "ANALYZING OUTCOME",
+            ),
+          );
+        });
+
         final responseStream = session.generateChatResponseAsync();
         bool extractedTool = false;
         bool isFirstToken = true;
         String textBuffer = "";
 
         await for (final chunk in responseStream) {
+          if (isFirstToken) {
+            setState(() {
+              if (_chatLog.isNotEmpty &&
+                  _chatLog.last is ToolExecutionSpinner) {
+                _chatLog.removeLast();
+              }
+            });
+          }
+
           if (chunk is TextResponse) {
             textBuffer += chunk.token;
-            if (!textBuffer.contains('call:') &&
+            if (textBuffer.trim().isNotEmpty &&
+                !textBuffer.contains('call:') &&
                 !textBuffer.contains('<tool_call')) {
               setState(() {
+                final cleaned = textBuffer.replaceAll('\\n', '\n').trim();
+                final msg = "> AI: $cleaned";
                 if (isFirstToken) {
-                  _chatLog.add("> AI:\\n" + textBuffer);
+                  _chatLog.add(msg);
                   isFirstToken = false;
                 } else if (_chatLog.isNotEmpty && _chatLog.last is String) {
-                  _chatLog[_chatLog.length - 1] = "> AI:\\n" + textBuffer;
+                  _chatLog[_chatLog.length - 1] = msg;
                 }
               });
             }
@@ -754,8 +883,10 @@ class _NotesScreenState extends State<NotesScreen> {
             if (!isFirstToken &&
                 _chatLog.isNotEmpty &&
                 _chatLog.last is String &&
-                (_chatLog.last as String).startsWith("> AI:\\n")) {
-              _chatLog.removeLast();
+                (_chatLog.last as String).startsWith("> AI:\n")) {
+              setState(() {
+                _chatLog.removeLast();
+              });
             }
 
             String toolResult = "";
@@ -766,16 +897,50 @@ class _NotesScreenState extends State<NotesScreen> {
               final arg = chunk.args['start_line'];
               if (arg != null)
                 start = arg is int ? arg : int.tryParse(arg.toString()) ?? 1;
-              final lines = _noteController.text.split('\\n');
+              final lines = _noteController.text.split('\n');
               final startIndex = (start - 1).clamp(0, lines.length);
               final endIndex = (startIndex + 50).clamp(0, lines.length);
-              toolResult = lines.sublist(startIndex, endIndex).join('\\n');
+
+              StringBuffer buffer = StringBuffer();
+              for (int i = startIndex; i < endIndex; i++) {
+                buffer.write("${i + 1}: ${lines[i]}\\n");
+              }
+              toolResult = buffer.toString();
               setState(() {
-                _chatLog.add("> READ [PAGE $start]");
+                _chatLog.add("> READ [LINES $start-${startIndex + 50}]");
               });
+            } else if (chunk.name == 'replace_lines') {
+              final start =
+                  int.tryParse(chunk.args['start_line']?.toString() ?? "1") ??
+                  1;
+              final end =
+                  int.tryParse(chunk.args['end_line']?.toString() ?? "1") ?? 1;
+              final newT = (chunk.args['new_text']?.toString() ?? "")
+                  .replaceAll('\\n', '\n');
+
+              final lines = _noteController.text.split('\n');
+              final oldLines = lines.sublist(
+                (start - 1).clamp(0, lines.length),
+                end.clamp(0, lines.length),
+              );
+
+              setState(() {
+                _chatLog.add(
+                  PendingChange(
+                    oldText: oldLines.join('\n'),
+                    newText: newT,
+                    isAppend: false,
+                  ),
+                );
+              });
+              isRunning = false;
             } else if (chunk.name == 'edit_content') {
-              final old = chunk.args['old_text']?.toString() ?? "";
-              final newT = chunk.args['new_text']?.toString() ?? "";
+              final old = (chunk.args['old_text']?.toString() ?? "").replaceAll(
+                '\\n',
+                '\n',
+              );
+              final newT = (chunk.args['new_text']?.toString() ?? "")
+                  .replaceAll('\\n', '\n');
               setState(() {
                 _chatLog.add(
                   PendingChange(
@@ -785,6 +950,18 @@ class _NotesScreenState extends State<NotesScreen> {
                   ),
                 );
               });
+              isRunning = false;
+            } else if (chunk.name == 'append_content') {
+              final newT = (chunk.args['content']?.toString() ?? "").replaceAll(
+                '\\n',
+                '\n',
+              );
+              setState(() {
+                _chatLog.add(
+                  PendingChange(oldText: "", newText: newT, isAppend: true),
+                );
+              });
+              isRunning = false;
               isRunning = false;
             }
 
@@ -801,7 +978,16 @@ class _NotesScreenState extends State<NotesScreen> {
             }
           }
         }
-        if (!extractedTool) isRunning = false;
+        if (!extractedTool) {
+          isRunning = false;
+          if (textBuffer.trim().isEmpty) {
+            setState(() {
+              _chatLog.add(
+                "> AI:\n[No output returned. Try rephrasing your command.]",
+              );
+            });
+          }
+        }
       }
     } catch (e) {
       setState(() {
@@ -885,7 +1071,6 @@ class _NotesScreenState extends State<NotesScreen> {
                                 itemCount: _chatLog.length,
                                 itemBuilder: (context, index) {
                                   final item = _chatLog[index];
-
                                   if (_isProcessing &&
                                       index == _chatLog.length - 1 &&
                                       item is String) {
@@ -937,6 +1122,63 @@ class _NotesScreenState extends State<NotesScreen> {
                                         ),
                                       );
                                     }
+                                  }
+
+                                  if (item is String) {
+                                    final showCursor =
+                                        _isProcessing &&
+                                        index == _chatLog.length - 1;
+                                    if (item.startsWith("> USER:")) {
+                                      return Padding(
+                                        padding: const EdgeInsets.only(
+                                          bottom: 8.0,
+                                        ),
+                                        child: Text(
+                                          item,
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontFamily: 'Courier',
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      );
+                                    } else if (item.startsWith("> AI:")) {
+                                      return Padding(
+                                        padding: const EdgeInsets.only(
+                                          bottom: 8.0,
+                                        ),
+                                        child: Text(
+                                          item + (showCursor ? " █" : ""),
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontFamily: 'Courier',
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                    return Padding(
+                                      padding: const EdgeInsets.only(
+                                        bottom: 8.0,
+                                      ),
+                                      child: Text(
+                                        item + (showCursor ? " █" : ""),
+                                        style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontFamily: 'Courier',
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    );
+                                  }
+
+                                  if (item is ToolExecutionSpinner) {
+                                    return Padding(
+                                      padding: const EdgeInsets.only(
+                                        bottom: 8.0,
+                                      ),
+                                      child: AsciiLoader(message: item.message),
+                                    );
                                   }
 
                                   if (item is PendingChange) {
@@ -1085,18 +1327,8 @@ class _NotesScreenState extends State<NotesScreen> {
                                     );
                                   }
 
-                                  final text = item as String;
-                                  return Padding(
-                                    padding: const EdgeInsets.only(bottom: 8.0),
-                                    child: Text(
-                                      text,
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontFamily: 'Courier',
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                  );
+
+                                  return const SizedBox.shrink();
                                 },
                               ),
                             ),
@@ -1118,6 +1350,7 @@ class _NotesScreenState extends State<NotesScreen> {
                                   Expanded(
                                     child: TextField(
                                       controller: _cmdController,
+                                      focusNode: _cmdFocusNode,
                                       enabled: !_isProcessing,
                                       style: const TextStyle(
                                         color: Colors.white,
@@ -1177,6 +1410,7 @@ class _NotesScreenState extends State<NotesScreen> {
                   // Instantly focus and snap robot tracking target
                   if (_showAiChat) {
                     _botTop = MediaQuery.of(context).size.height / 2;
+                    _cmdFocusNode.requestFocus();
                   }
                 });
               },
