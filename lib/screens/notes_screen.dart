@@ -9,6 +9,7 @@ import 'package:record/record.dart';
 import '../models/note.dart';
 import '../models/pending_change.dart';
 import '../models/voice_message.dart';
+import 'package:file_picker/file_picker.dart';
 import '../services/gemma_service.dart';
 import '../services/model_status_service.dart';
 import '../services/notes_service.dart';
@@ -136,13 +137,13 @@ class _NotesScreenState extends State<NotesScreen> {
     _ampSubscription = _recorder
         .onAmplitudeChanged(const Duration(milliseconds: 80))
         .listen((amp) {
-      setState(() {
-        double norm = (amp.current + 60) / 60;
-        if (norm < 0) norm = 0;
-        _liveAmplitudes.add(norm);
-        if (_liveAmplitudes.length > 50) _liveAmplitudes.removeAt(0);
-      });
-    });
+          setState(() {
+            double norm = (amp.current + 60) / 60;
+            if (norm < 0) norm = 0;
+            _liveAmplitudes.add(norm);
+            if (_liveAmplitudes.length > 50) _liveAmplitudes.removeAt(0);
+          });
+        });
   }
 
   Future<void> _stopRecording() async {
@@ -227,6 +228,60 @@ class _NotesScreenState extends State<NotesScreen> {
     );
   }
 
+  Future<Directory> _getImageDirectory() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final imagesDir = Directory('${dir.path}/note_images');
+    if (!await imagesDir.exists()) {
+      await imagesDir.create(recursive: true);
+    }
+    return imagesDir;
+  }
+
+  Future<void> _insertImage() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+    );
+
+    if (result == null || result.files.isEmpty) {
+      return;
+    }
+
+    final picked = result.files.first;
+    if (picked.path == null) {
+      return;
+    }
+
+    final source = File(picked.path!);
+    final imagesDir = await _getImageDirectory();
+    final destinationPath =
+        '${imagesDir.path}/${widget.note.id}_${DateTime.now().millisecondsSinceEpoch}_${picked.name}';
+    final destination = await source.copy(destinationPath);
+
+    setState(() {
+      widget.note.imagePaths = List<String>.from(widget.note.imagePaths)
+        ..add(destination.path);
+      _noteController.text +=
+          '${_noteController.text.isEmpty ? '' : '\n'}![${picked.name}](${destination.path})';
+    });
+    _notesService.saveNote(widget.note);
+  }
+
+  void _removeImage(int index) {
+    final removedPath = widget.note.imagePaths[index];
+    setState(() {
+      widget.note.imagePaths = List<String>.from(widget.note.imagePaths)
+        ..removeAt(index);
+      _noteController.text = _noteController.text
+          .replaceAll(
+            RegExp(r'!\[.*?\]\(' + RegExp.escape(removedPath) + r'\)'),
+            '',
+          )
+          .trim();
+    });
+    _notesService.saveNote(widget.note);
+  }
+
   void _onAcceptChange(PendingChange change) {
     setState(() {
       if (change.isAppend) {
@@ -234,8 +289,9 @@ class _NotesScreenState extends State<NotesScreen> {
             (_noteController.text.isEmpty ? '' : '\n') + change.newText;
       } else {
         final current = _noteController.text;
-        final target =
-            current.contains(change.oldText) ? change.oldText : change.oldText.trim();
+        final target = current.contains(change.oldText)
+            ? change.oldText
+            : change.oldText.trim();
         if (current.contains(target)) {
           _noteController.text = current.replaceFirst(target, change.newText);
         }
@@ -265,6 +321,13 @@ class _NotesScreenState extends State<NotesScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text('root@gemma:~# nano ${widget.note.title}'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.image),
+            tooltip: 'Insert image',
+            onPressed: _insertImage,
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1.0),
           child: Container(color: Colors.white38, height: 1.0),
@@ -313,22 +376,84 @@ class _NotesScreenState extends State<NotesScreen> {
   Widget _buildNoteEditor() {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: TextField(
-        onTap: () => setState(() => _showAiChat = false),
-        controller: _noteController,
-        maxLines: null,
-        expands: true,
-        style: const TextStyle(
-          color: Colors.white,
-          fontFamily: 'Courier',
-          fontSize: 16,
-        ),
-        decoration: const InputDecoration(
-          border: InputBorder.none,
-          hintText:
-              '// type your notes here...\n// use the floating robot to interact with AI.',
-          hintStyle: TextStyle(color: Colors.white38),
-        ),
+      child: Column(
+        children: [
+          if (widget.note.imagePaths.isNotEmpty)
+            SizedBox(
+              height: 110,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: widget.note.imagePaths.length,
+                itemBuilder: (context, index) {
+                  final path = widget.note.imagePaths[index];
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 12.0),
+                    child: Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.file(
+                            File(path),
+                            width: 110,
+                            height: 110,
+                            fit: BoxFit.cover,
+                            errorBuilder: (context, error, stackTrace) =>
+                                Container(
+                                  width: 110,
+                                  height: 110,
+                                  color: Colors.white12,
+                                  alignment: Alignment.center,
+                                  child: const Icon(
+                                    Icons.broken_image,
+                                    color: Colors.white54,
+                                  ),
+                                ),
+                          ),
+                        ),
+                        Positioned(
+                          right: 4,
+                          top: 4,
+                          child: GestureDetector(
+                            onTap: () => _removeImage(index),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.close,
+                                size: 18,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          Expanded(
+            child: TextField(
+              onTap: () => setState(() => _showAiChat = false),
+              controller: _noteController,
+              maxLines: null,
+              expands: true,
+              style: const TextStyle(
+                color: Colors.white,
+                fontFamily: 'Courier',
+                fontSize: 16,
+              ),
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                hintText:
+                    '// type your notes here...\n// use the floating robot to interact with AI.',
+                hintStyle: TextStyle(color: Colors.white38),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -356,10 +481,14 @@ class _NotesScreenState extends State<NotesScreen> {
           final size = MediaQuery.of(context).size;
           const bubbleSize = 90.0;
           setState(() {
-            _botLeft = (_botLeft + details.delta.dx)
-                .clamp(0.0, size.width - bubbleSize);
-            _botTop = (_botTop + details.delta.dy)
-                .clamp(0.0, size.height - bubbleSize - 56.0);
+            _botLeft = (_botLeft + details.delta.dx).clamp(
+              0.0,
+              size.width - bubbleSize,
+            );
+            _botTop = (_botTop + details.delta.dy).clamp(
+              0.0,
+              size.height - bubbleSize - 56.0,
+            );
           });
         },
         child: Container(
@@ -383,8 +512,8 @@ class _NotesScreenState extends State<NotesScreen> {
             state: _isProcessing
                 ? BotState.thinking
                 : (ModelStatusService.instance.isReady
-                    ? BotState.awake
-                    : BotState.exhausted),
+                      ? BotState.awake
+                      : BotState.exhausted),
             botX: _botLeft,
             botY: _botTop,
             targetX: _getCursorX(),
