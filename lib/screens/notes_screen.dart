@@ -10,6 +10,7 @@ import '../models/note.dart';
 import '../models/pending_change.dart';
 import '../models/voice_message.dart';
 import '../services/gemma_service.dart';
+import '../services/model_status_service.dart';
 import '../services/notes_service.dart';
 import '../widgets/ai_chat_panel.dart';
 import '../widgets/ascii_bot.dart';
@@ -56,6 +57,7 @@ class _NotesScreenState extends State<NotesScreen> {
     super.initState();
     _noteController.text = widget.note.content;
     _noteController.addListener(_onNoteChanged);
+    ModelStatusService.instance.addListener(_onModelStatusChanged);
     // Position the bot bubble at the right-center after layout
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -75,6 +77,7 @@ class _NotesScreenState extends State<NotesScreen> {
     _cmdFocusNode.dispose();
     _noteController.dispose();
     _cmdController.dispose();
+    ModelStatusService.instance.removeListener(_onModelStatusChanged);
     _ampSubscription?.cancel();
     _countdownTimer?.cancel();
     _recorder.dispose();
@@ -98,6 +101,10 @@ class _NotesScreenState extends State<NotesScreen> {
     }
     note.updatedAt = DateTime.now();
     _notesService.saveNote(note);
+  }
+
+  void _onModelStatusChanged() {
+    if (mounted) setState(() {});
   }
 
   // ── Audio recording ────────────────────────────────────────────────────────
@@ -178,6 +185,9 @@ class _NotesScreenState extends State<NotesScreen> {
   }
 
   void _runCommand({Uint8List? audioBytes, List<double>? recordedAmplitudes}) {
+    // Guard: don't attempt AI commands if model isn't ready
+    if (!ModelStatusService.instance.isReady) return;
+
     final cmd = _cmdController.text.trim();
     if (cmd.isEmpty && audioBytes == null) return;
     _cmdController.clear();
@@ -201,7 +211,13 @@ class _NotesScreenState extends State<NotesScreen> {
       onLogUpdate: (index, item) => setState(() => _chatLog[index] = item),
       onScrollToBottom: _scrollToBottom,
       onPendingChange: (_) {},
-      onDone: () => setState(() => _isProcessing = false),
+      onDone: () {
+        if (mounted) {
+          setState(() => _isProcessing = false);
+          // Final scroll after UI settles
+          Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
+        }
+      },
       onError: (err) => setState(() => _chatLog.add(err)),
       getLogLength: () => _chatLog.length,
       getLogItem: (i) => _chatLog[i],
@@ -235,6 +251,11 @@ class _NotesScreenState extends State<NotesScreen> {
     if (_noteController.text.isEmpty) return 100;
     final lines = _noteController.text.split('\n').length;
     return (lines * 22.0).clamp(50.0, MediaQuery.of(context).size.height - 100);
+  }
+
+  void _stopGeneration() {
+    _gemmaService.stopGeneration();
+    if (mounted) setState(() => _isProcessing = false);
   }
 
   // ── Build ──────────────────────────────────────────────────────────────────
@@ -275,6 +296,7 @@ class _NotesScreenState extends State<NotesScreen> {
                           onSendPressed: () => _runCommand(),
                           onNoteAccept: _onAcceptChange,
                           onNoteReject: () {},
+                          onStopPressed: _stopGeneration,
                         ),
                       )
                     : const SizedBox(width: double.infinity, height: 0),
@@ -358,7 +380,11 @@ class _NotesScreenState extends State<NotesScreen> {
             ],
           ),
           child: AsciiBot(
-            state: _isProcessing ? BotState.thinking : BotState.awake,
+            state: _isProcessing
+                ? BotState.thinking
+                : (ModelStatusService.instance.isReady
+                    ? BotState.awake
+                    : BotState.exhausted),
             botX: _botLeft,
             botY: _botTop,
             targetX: _getCursorX(),

@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_gemma/flutter_gemma.dart';
+import '../services/model_status_service.dart';
 import '../widgets/ascii_bot.dart';
 import 'home_screen.dart';
 
@@ -11,84 +11,44 @@ class BootScreen extends StatefulWidget {
 }
 
 class _BootScreenState extends State<BootScreen> {
-  final List<String> _logs = ['> init system...'];
-  bool _isDownloading = false;
-  bool _isExhausted = true;
-  double _progress = 0.0;
-
-  static const _modelUrl =
-      'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm';
+  final _modelService = ModelStatusService.instance;
 
   @override
   void initState() {
     super.initState();
-    _checkAndPrepareModel();
+    _modelService.addListener(_onModelUpdate);
+    // Start model preparation in the background
+    _modelService.prepareModel();
+    // Navigate to the app after a brief splash
+    _navigateAfterSplash();
   }
 
-  void _log(String message) => setState(() => _logs.add(message));
-
-  String _progressBar(double p) {
-    const total = 20;
-    final filled = (total * p).round();
-    final bar = StringBuffer('[');
-    for (int i = 0; i < total; i++) {
-      if (i < filled) {
-        bar.write('#');
-      } else if (i == filled) {
-        bar.write('>');
-      } else {
-        bar.write('-');
-      }
-    }
-    bar.write(']');
-    return bar.toString();
+  @override
+  void dispose() {
+    _modelService.removeListener(_onModelUpdate);
+    super.dispose();
   }
 
-  Future<void> _checkAndPrepareModel() async {
-    try {
-      _log('> checking and syncing AI model registry...');
-      setState(() {
-        _isDownloading = true;
-        _isExhausted = true;
-      });
+  void _onModelUpdate() {
+    if (mounted) setState(() {});
+  }
 
-      _log('> downloading valid Gemma artifact...');
-
-      await FlutterGemma.installModel(
-        modelType: ModelType.gemmaIt,
-      ).fromNetwork(_modelUrl).withProgress((progress) {
-        if (mounted) setState(() => _progress = progress / 100.0);
-      }).install();
-
-      setState(() {
-        _isDownloading = false;
-        _isExhausted = false;
-      });
-      _log('> installation complete. awakening...');
-
-      _log('> pre-warming model context...');
-      await FlutterGemma.getActiveModel(
-        maxTokens: 10000,
-        preferredBackend: PreferredBackend.gpu,
-        supportAudio: true,
+  Future<void> _navigateAfterSplash() async {
+    // Show splash for 2 seconds regardless of model status
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
       );
-
-      _log('> system online.');
-      await Future.delayed(const Duration(milliseconds: 1400));
-
-      if (mounted) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
-        );
-      }
-    } catch (e) {
-      if (mounted) setState(() => _isDownloading = false);
-      _log('> FATAL ENGINE ERROR: $e');
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final isExhausted = _modelService.status != ModelStatus.ready;
+    final isDownloading = _modelService.status == ModelStatus.downloading;
+    final progress = _modelService.downloadProgress;
+
     return Scaffold(
       body: Padding(
         padding: const EdgeInsets.all(24.0),
@@ -99,26 +59,27 @@ class _BootScreenState extends State<BootScreen> {
             Center(
               child: _BotBubble(
                 child: AsciiBot(
-                  state: _isExhausted ? BotState.exhausted : BotState.awake,
+                  state: isExhausted ? BotState.exhausted : BotState.awake,
                 ),
               ),
             ),
             const SizedBox(height: 64),
-            ..._logs.map(
-              (l) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4.0),
-                child: Text(l, style: const TextStyle(fontWeight: FontWeight.bold)),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4.0),
+              child: Text(
+                _modelService.statusMessage,
+                style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
-            if (_isDownloading) ...[
+            if (isDownloading) ...[
               const SizedBox(height: 16),
               Text(
-                '> DOWNLOADING: ${_progressBar(_progress)} ${(_progress * 100).toStringAsFixed(1)}%',
+                '> DOWNLOADING: ${_modelService.progressBar} ${(progress * 100).toStringAsFixed(1)}%',
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 4),
               Text(
-                '> SIZE: ${(4.5 * _progress).toStringAsFixed(2)} GB / 4.50 GB',
+                '> SIZE: ${(4.5 * progress).toStringAsFixed(2)} GB / 4.50 GB',
                 style: const TextStyle(
                   color: Colors.white54,
                   fontWeight: FontWeight.bold,

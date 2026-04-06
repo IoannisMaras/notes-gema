@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
@@ -10,13 +11,20 @@ typedef ApplyToNoteCallback = void Function(PendingChange change);
 
 class GemmaService {
   dynamic _chatSession;
+  bool _contextSent = false;
 
   static const _roleInstructions =
-      'Role: AI Note Editor. Your goal is to proactively maintain and improve '
-      "the user's note. Tools: [read_note_lines, apply_patch_to_note, "
-      'edit_note_text, add_to_note_end]. Rule: ALWAYS reply with text OR use a '
-      'tool. Use read_note_lines to observe the content, then other tools to '
-      'modify it. Never output an empty string.';
+      'Role: AI Note Editor with full conversation memory. '
+      'You remember everything the user has said in this session. '
+      'Your goal is to proactively maintain and improve the user\'s note. '
+      'Tools: [read_note_lines, apply_patch_to_note, edit_note_text, add_to_note_end]. '
+      'Rules: '
+      '1. ALWAYS reply with text OR use a tool. Never output an empty string. '
+      '2. You will receive the note snapshot ONCE at the start. After that, '
+      'rely on your memory and use read_note_lines to check current state. '
+      '3. When the user refers to something from earlier in the conversation, '
+      'use your memory to understand the context. '
+      '4. Think step-by-step before making edits.';
 
   static const List<Tool> _tools = [
     Tool(
@@ -95,6 +103,11 @@ class GemmaService {
 
   void resetSession() {
     _chatSession = null;
+    _contextSent = false;
+  }
+
+  void stopGeneration() {
+    _chatSession?.stopGeneration();
   }
 
   /// Runs the full agentic tool loop.
@@ -120,16 +133,9 @@ class GemmaService {
   }) async {
     try {
       final model = await FlutterGemma.getActiveModel(
-        maxTokens: 4096,
+        maxTokens: 8192,
         supportAudio: true,
       );
-
-      final fullText = getNoteText();
-      final contextText = fullText.length > 2000
-          ? '...\\n${fullText.substring(fullText.length - 2000)}'
-          : fullText;
-
-      final prompt = 'Snapshot: $contextText. Command: $textCommand';
 
       if (_chatSession == null) {
         _chatSession = await model.createChat(
@@ -137,10 +143,35 @@ class GemmaService {
           supportAudio: true,
           tools: _tools,
           systemInstruction: _roleInstructions,
+          isThinking: true,
         );
+        _contextSent = false;
       }
 
       final session = _chatSession!;
+
+      // Send the note snapshot only on first interaction or after reset
+      if (!_contextSent) {
+        final fullText = getNoteText();
+        final contextText = fullText.length > 3000
+            ? '...\n${fullText.substring(fullText.length - 3000)}'
+            : fullText;
+        final contextMsg = fullText.trim().isEmpty
+            ? '[NOTE IS EMPTY] The user has not written anything yet.'
+            : 'CURRENT NOTE SNAPSHOT (you will not receive this again — use read_note_lines for updates):\n$contextText';
+        await session.addQueryChunk(
+          Message.text(text: contextMsg, isUser: true),
+        );
+        // Get a brief ack from the model so the context is committed to history
+        await for (final _ in session.generateChatResponseAsync()) {}
+        _contextSent = true;
+      }
+
+      // Send the actual user command — lightweight, no snapshot attached
+      final prompt = textCommand.trim().isEmpty
+          ? '[Voice command — see audio]'
+          : textCommand;
+
       if (audioBytes != null) {
         await session.addQueryChunk(
           Message.withAudio(text: prompt, audioBytes: audioBytes, isUser: true),
@@ -180,20 +211,63 @@ class GemmaService {
 
           if (chunk is TextResponse) {
             textBuffer += chunk.token;
-            if (textBuffer.trim().isNotEmpty) {
-              final cleaned = textBuffer.replaceAll('\\n', '\n').trim();
-              final msg = '> AI: $cleaned';
-              if (isFirstToken) {
-                onLog(msg);
-                isFirstToken = false;
-              } else {
-                final lastIdx = getLogLength() - 1;
-                final last = getLogItem(lastIdx);
-                if (last is String) {
-                  onLogUpdate(lastIdx, msg);
-                }
+
+            // ── Manual Tool Call Parser Fallback ────────────────────────────
+            // Look for: <|tool_call>call:NAME{ARGS}<tool_call|>
+            final toolCaptureRegex = RegExp(
+              r'<\|tool_call>call:(\w+)(\{.*?\})<tool_call\|>',
+              dotAll: true,
+            );
+            final match = toolCaptureRegex.firstMatch(textBuffer);
+
+            if (match != null) {
+              callName = match.group(1);
+              final rawArgs = match.group(2) ?? '{}';
+              try {
+                // Pre-process JSON-like strings that might have unquoted keys
+                String sanitizedJson = rawArgs
+                    .replaceAllMapped(RegExp(r'(\w+):'), (m) => '"${m.group(1)}":')
+                    .replaceAll('\\n', '\n');
+                callArgs = jsonDecode(sanitizedJson) as Map<String, dynamic>;
+              } catch (e) {
+                // If deep parsing fails, fall back to simple regex for known keys
+                callArgs = {
+                  'content': RegExp(r'content:\s*"(.*?)"').firstMatch(rawArgs)?.group(1),
+                  'new_text': RegExp(r'new_text:\s*"(.*?)"').firstMatch(rawArgs)?.group(1),
+                  'old_text': RegExp(r'old_text:\s*"(.*?)"').firstMatch(rawArgs)?.group(1),
+                  'start_line': int.tryParse(RegExp(r'start_line:\s*(\d+)').firstMatch(rawArgs)?.group(1) ?? ''),
+                  'end_line': int.tryParse(RegExp(r'end_line:\s*(\d+)').firstMatch(rawArgs)?.group(1) ?? ''),
+                };
               }
-              onScrollToBottom();
+              extractedTool = true;
+              // Clean textBuffer of the tool call string so it doesn't leak into UI
+              textBuffer = textBuffer.replaceFirst(match.group(0)!, '').trim();
+              break;
+            }
+
+            if (textBuffer.trim().isNotEmpty) {
+              // Strip <thought> tags if model is in thinking mode
+              String cleaned = textBuffer
+                  .replaceAll(RegExp(r'<thought>.*?</thought>', dotAll: true), '')
+                  .replaceAll('\\n', '\n')
+                  .trim();
+
+              if (cleaned.isNotEmpty) {
+                final msg = '> AI: $cleaned';
+                if (isFirstToken) {
+                  onLog(msg);
+                  isFirstToken = false;
+                } else {
+                  final lastIdx = getLogLength() - 1;
+                  final last = getLogItem(lastIdx);
+                  if (last is String && last.startsWith('> AI:')) {
+                    onLogUpdate(lastIdx, msg);
+                  } else {
+                    onLog(msg);
+                  }
+                }
+                onScrollToBottom();
+              }
             }
           } else if (chunk is FunctionCallResponse) {
             callName = chunk.name;
