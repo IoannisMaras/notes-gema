@@ -33,6 +33,29 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
+  <script type="module">
+    import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.14';
+    window.FilesetResolver = FilesetResolver;
+    window.LlmInference = LlmInference;
+    
+    // Add a helper to check for WebGPU support
+    window.isWebGPUSupported = async function() {
+      if (!navigator.gpu) return false;
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) return false;
+        // MediaPipe needs to be able to actually create a device
+        const device = await adapter.requestDevice();
+        if (!device) return false;
+        device.destroy(); // Clean up
+        return true;
+      } catch (e) {
+        return false;
+      }
+    };
+  </script>
+  <script src="./cache_api.js"></script>
+  <script src="./opfs_helper.js"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

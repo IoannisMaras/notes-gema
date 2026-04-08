@@ -337,8 +337,8 @@ class _NotesScreenState extends State<NotesScreen> {
         children: [
           Column(
             children: [
-              // Note editor
               Expanded(child: _buildNoteEditor()),
+              _statusBar(context),
               // Sliding AI panel
               AnimatedSize(
                 duration: const Duration(milliseconds: 300),
@@ -521,6 +521,44 @@ class _NotesScreenState extends State<NotesScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _statusBar(BuildContext context) {
+    final svc = ModelStatusService.instance;
+    return ListenableBuilder(
+      listenable: svc,
+      builder: (context, _) {
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: const BoxDecoration(
+            color: Color(0xFF121214),
+            border: Border(top: BorderSide(color: Colors.white10)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.flash_on, color: Colors.cyanAccent, size: 14),
+              const SizedBox(width: 8),
+              Text(
+                svc.activeBackend.toUpperCase(),
+                style: const TextStyle(
+                  color: Colors.cyanAccent,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Spacer(),
+              const Icon(Icons.memory, color: Colors.white38, size: 14),
+              const SizedBox(width: 8),
+              Text(
+                svc.memoryUsage,
+                style: const TextStyle(color: Colors.white38, fontSize: 11),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

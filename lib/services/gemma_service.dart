@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import '../models/pending_change.dart';
 import '../models/tool_execution_spinner.dart';
+import 'model_status_service.dart';
 
 typedef ChatLogCallback = void Function(dynamic item);
 typedef NoteTextCallback = String Function();
@@ -134,6 +135,9 @@ class GemmaService {
     try {
       final model = await FlutterGemma.getActiveModel(
         maxTokens: 8192,
+        preferredBackend: ModelStatusService.instance.useGpu 
+            ? PreferredBackend.gpu 
+            : PreferredBackend.cpu,
         supportAudio: true,
       );
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/note.dart';
 import '../services/notes_service.dart';
+import '../services/model_status_service.dart';
 import 'notes_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -47,20 +48,124 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('root@gemma:~# ls -l ./notes'),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1.0),
-          child: Container(color: Colors.white38, height: 1.0),
+      drawer: Drawer(
+        backgroundColor: const Color(0xFF0A0A0B),
+        child: Column(
+          children: [
+            DrawerHeader(
+              decoration: const BoxDecoration(
+                border: Border(bottom: BorderSide(color: Colors.white10)),
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.psychology, color: Colors.cyanAccent, size: 48),
+                    const SizedBox(height: 12),
+                    Text(
+                      'NEURO_LINK v1.0',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 18),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            _drawerItem(Icons.terminal, 'TERMINAL_SESSION', () => Navigator.pop(context)),
+            _drawerItem(Icons.memory, 'RESOURCE_MONITOR', () {}),
+            _drawerItem(Icons.settings, 'SYS_CONFIG', () {}),
+            const Spacer(),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Text(
+                'BUILD_REV: 040826\nSTATUS: ENCRYPTED',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.white24, fontSize: 10),
+              ),
+            ),
+          ],
         ),
       ),
-      body: _notes.isEmpty ? _emptyState() : _noteList(),
+      appBar: AppBar(
+        title: const Text('root@gemma:~# ls -l ./notes'),
+        actions: [
+          _statusPill(context),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(child: _notes.isEmpty ? _emptyState() : _noteList()),
+          _statusBar(context),
+        ],
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: _createNewNote,
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
+        elevation: 10,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: const Icon(Icons.add),
       ),
+    );
+  }
+
+  Widget _drawerItem(IconData icon, String label, VoidCallback onTap) {
+    return ListTile(
+      leading: Icon(icon, color: Colors.cyanAccent, size: 20),
+      title: Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, letterSpacing: 1)),
+      onTap: onTap,
+    );
+  }
+
+  Widget _statusPill(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.cyanAccent.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.3)),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(radius: 3, backgroundColor: Colors.cyanAccent),
+            SizedBox(width: 8),
+            Text('SYNCED', style: TextStyle(color: Colors.cyanAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statusBar(BuildContext context) {
+    final svc = ModelStatusService.instance;
+    return ListenableBuilder(
+      listenable: svc,
+      builder: (context, _) {
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: const BoxDecoration(
+            color: Color(0xFF121214),
+            border: Border(top: BorderSide(color: Colors.white10)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.flash_on, color: Colors.cyanAccent, size: 14),
+              const SizedBox(width: 8),
+              Text(
+                svc.activeBackend.toUpperCase(),
+                style: const TextStyle(color: Colors.cyanAccent, fontSize: 11, fontWeight: FontWeight.bold),
+              ),
+              const Spacer(),
+              const Icon(Icons.memory, color: Colors.white38, size: 14),
+              const SizedBox(width: 8),
+              Text(
+                svc.memoryUsage,
+                style: const TextStyle(color: Colors.white38, fontSize: 11),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
