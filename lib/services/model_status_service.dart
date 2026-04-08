@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
-import 'package:dio/dio.dart';
 import 'gpu_helper.dart';
 
 /// Global singleton tracking the AI model's lifecycle.
@@ -29,7 +28,7 @@ class ModelStatusService extends ChangeNotifier {
 
   static const _remoteModelUrl =
       'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm';
-  static const _localModelUrl = './models/gemma-4-E2B-it.litertlm';
+  // static const _localModelUrl = './models/gemma-4-E2B-it.litertlm';
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   String get memoryUsage => _useGpu ? '2.5 GB / 4.0 GB (vRAM)' : '2.5 GB / 8.0 GB (RAM)';
@@ -87,9 +86,11 @@ class ModelStatusService extends ChangeNotifier {
         
         if (isLocal) {
           // IMPORTANT: Use absolute path to bypass plugin normalization issues
-          // We assume localhost for debug
-          targetUrl = './$modelFileName';
-          print('[SYSTEM] Root-level local model detected.');
+          // We must provide a full HTTP/HTTPS URL for the web backend
+          targetUrl = Uri.base.resolve(modelFileName).toString();
+          debugPrint('[SYSTEM] Root-level local model detected at: $targetUrl');
+        } else {
+          debugPrint('[SYSTEM] Local model not found at root, falling back to remote URL.');
         }
       }
 

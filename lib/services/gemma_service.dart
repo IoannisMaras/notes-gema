@@ -135,13 +135,29 @@ class GemmaService {
     try {
       final modelService = ModelStatusService.instance;
       
-      var model = await FlutterGemma.getActiveModel(
-        maxTokens: 8192,
-        preferredBackend: modelService.useGpu 
-            ? PreferredBackend.gpu 
-            : PreferredBackend.cpu,
-        supportAudio: true,
-      );
+      dynamic model;
+      try {
+        model = await FlutterGemma.getActiveModel(
+          maxTokens: 8192,
+          preferredBackend: modelService.useGpu 
+              ? PreferredBackend.gpu 
+              : PreferredBackend.cpu,
+          supportAudio: true,
+        );
+      } catch (e) {
+        // If we fail on GPU for ANY reason, try CPU
+        if (modelService.useGpu) {
+          onLog('> GPU INITIALIZATION FAILED. FALLING BACK TO CPU...');
+          modelService.forceCpu();
+          model = await FlutterGemma.getActiveModel(
+            maxTokens: 8192,
+            preferredBackend: PreferredBackend.cpu,
+            supportAudio: true,
+          );
+        } else {
+          rethrow;
+        }
+      }
 
       if (_chatSession == null) {
         try {
@@ -153,10 +169,9 @@ class GemmaService {
             isThinking: true,
           );
         } catch (e) {
-          final errorStr = e.toString().toLowerCase();
-          // If we fail on GPU, force CPU and retry once
-          if (modelService.useGpu && (errorStr.contains('gpu') || errorStr.contains('adapter') || errorStr.contains('webgpu'))) {
-            onLog('> GPU ENGAGEMENT FAILED. ENGAGING CPU XNNPACK...');
+          // If we fail on GPU for ANY reason, try CPU
+          if (modelService.useGpu) {
+            onLog('> GPU SESSION FAILED. SWITCHING TO CPU XNNPACK...');
             modelService.forceCpu();
             model = await FlutterGemma.getActiveModel(
               maxTokens: 8192,

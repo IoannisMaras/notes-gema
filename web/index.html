@@ -34,10 +34,64 @@
 </head>
 <body>
   <script type="module">
-    import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.16';
+    import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.20';
     window.FilesetResolver = FilesetResolver;
     window.LlmInference = LlmInference;
+
+    // FORCE VERSION INTERCEPTOR (0.10.20): 
+    const originalForGenAiTasks = window.FilesetResolver.forGenAiTasks;
+    window.FilesetResolver.forGenAiTasks = async function(workerPath) {
+      console.log("[SYSTEM] Forcing GenAI Task Resolver to version 0.10.20...");
+      return await originalForGenAiTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.20/wasm");
+    };
+
+    // Helper to clear the local OPFS storage if the model is corrupted or mismatched
+    window.clearModelCache = async function() {
+      try {
+        if (navigator.storage && navigator.storage.getDirectory) {
+           const root = await navigator.storage.getDirectory();
+           // The flutter_gemma plugin stores models at the root of OPFS
+           await root.removeEntry('gemma-4-E2B-it.litertlm');
+           console.log("[SYSTEM] OPFS model cache cleared successfully.");
+           return true;
+        }
+      } catch (e) {
+        console.log("[SYSTEM] OPFS clear skipped (file not found or not supported).");
+      }
+      return false;
+    };
     
+    // Proactive safety: many browsers have navigator.gpu but return a null adapter 
+    // or lack the requestAdapterInfo method, causing the flutter_gemma plugin to crash
+    // during initialization or logging.
+    if (navigator.gpu) {
+      const originalRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+      navigator.gpu.requestAdapter = async function(options) {
+        try {
+          let adapter = await originalRequestAdapter(options);
+          
+          if (!adapter) {
+            console.warn("[SYSTEM] WebGPU adapter is null. Providing a safety stub to prevent crashes.");
+            // Return a minimal stub that satisfies the plugin's logging/info requirements
+            return {
+              requestAdapterInfo: async () => ({ device: "none", architecture: "none", vendor: "none", description: "safety-stub" }),
+              requestDevice: async () => { throw new Error("WebGPU not available on this hardware."); },
+              features: { has: () => false },
+              limits: {}
+            };
+          }
+          
+          if (!adapter.requestAdapterInfo) {
+            adapter.requestAdapterInfo = async () => ({ device: "unknown", architecture: "unknown", vendor: "unknown", description: "shim" });
+          }
+          return adapter;
+        } catch (e) {
+          console.warn("[SYSTEM] navigator.gpu.requestAdapter threw an error:", e);
+          return null; 
+        }
+      };
+    }
+
     // Add a helper to check for WebGPU support
     window.isWebGPUSupported = async function() {
       console.log("[SYSTEM] Checking WebGPU requirements...");
@@ -51,26 +105,13 @@
         const adapter = await navigator.gpu.requestAdapter();
         if (!adapter) {
           console.log("[SYSTEM] WebGPU not supported: Failed to request adapter.");
-          // CRITICAL HACK: If the adapter failed, MediaPipe might still try to use it and crash.
-          // We "hide" the non-functional gpu object to force MediaPipe into pure CPU mode.
-          Object.defineProperty(navigator, 'gpu', { get: () => undefined });
-          console.log("[SYSTEM] Broken WebGPU adapter detected. navigator.gpu has been shielded to prevent crashes.");
           return false;
         }
         
-        const device = await adapter.requestDevice();
-        if (!device) {
-          console.log("[SYSTEM] WebGPU not supported: Failed to request device.");
-          Object.defineProperty(navigator, 'gpu', { get: () => undefined });
-          return false;
-        }
-        
-        device.destroy(); // Clean up
         console.log("[SYSTEM] WebGPU validation successful.");
         return true;
       } catch (e) {
         console.log("[SYSTEM] WebGPU error during check:", e);
-        Object.defineProperty(navigator, 'gpu', { get: () => undefined });
         return false;
       }
     };
@@ -81,14 +122,30 @@
       try {
         // Try HEAD first (fastest)
         let response = await fetch(url, { method: 'HEAD' });
-        if (response.ok) return true;
+        if (response.ok) {
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('text/html')) {
+             console.log("[SYSTEM] False positive detected: received HTML instead of model.");
+             return false;
+          }
+          return true;
+        }
         
         // If HEAD is blocked or not allowed, try a small GET range
         response = await fetch(url, { 
           method: 'GET', 
           headers: { 'Range': 'bytes=0-0' } 
         });
-        return response.ok || response.status === 206;
+        
+        if (response.ok || response.status === 206) {
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('text/html')) {
+             console.log("[SYSTEM] False positive detected (range): received HTML instead of model.");
+             return false;
+          }
+          return true;
+        }
+        return false;
       } catch (e) {
         console.log("[SYSTEM] File check failed for " + url + ":", e);
         return false;
