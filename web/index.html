@@ -34,22 +34,63 @@
 </head>
 <body>
   <script type="module">
-    import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.14';
+    import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.16';
     window.FilesetResolver = FilesetResolver;
     window.LlmInference = LlmInference;
     
     // Add a helper to check for WebGPU support
     window.isWebGPUSupported = async function() {
-      if (!navigator.gpu) return false;
+      console.log("[SYSTEM] Checking WebGPU requirements...");
+      
+      if (!navigator.gpu) {
+        console.log("[SYSTEM] WebGPU not supported: navigator.gpu is undefined.");
+        return false;
+      }
+      
       try {
         const adapter = await navigator.gpu.requestAdapter();
-        if (!adapter) return false;
-        // MediaPipe needs to be able to actually create a device
+        if (!adapter) {
+          console.log("[SYSTEM] WebGPU not supported: Failed to request adapter.");
+          // CRITICAL HACK: If the adapter failed, MediaPipe might still try to use it and crash.
+          // We "hide" the non-functional gpu object to force MediaPipe into pure CPU mode.
+          Object.defineProperty(navigator, 'gpu', { get: () => undefined });
+          console.log("[SYSTEM] Broken WebGPU adapter detected. navigator.gpu has been shielded to prevent crashes.");
+          return false;
+        }
+        
         const device = await adapter.requestDevice();
-        if (!device) return false;
+        if (!device) {
+          console.log("[SYSTEM] WebGPU not supported: Failed to request device.");
+          Object.defineProperty(navigator, 'gpu', { get: () => undefined });
+          return false;
+        }
+        
         device.destroy(); // Clean up
+        console.log("[SYSTEM] WebGPU validation successful.");
         return true;
       } catch (e) {
+        console.log("[SYSTEM] WebGPU error during check:", e);
+        Object.defineProperty(navigator, 'gpu', { get: () => undefined });
+        return false;
+      }
+    };
+
+    // New helper to check if the model exists locally without crashing Dart/Dio
+    window.checkFileExists = async function(url) {
+      console.log("[SYSTEM] Checking local file:", url);
+      try {
+        // Try HEAD first (fastest)
+        let response = await fetch(url, { method: 'HEAD' });
+        if (response.ok) return true;
+        
+        // If HEAD is blocked or not allowed, try a small GET range
+        response = await fetch(url, { 
+          method: 'GET', 
+          headers: { 'Range': 'bytes=0-0' } 
+        });
+        return response.ok || response.status === 206;
+      } catch (e) {
+        console.log("[SYSTEM] File check failed for " + url + ":", e);
         return false;
       }
     };

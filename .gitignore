@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# AI Models (Local)
+/web/models/
+/web/*.litertlm
+/assets/models/
+/assets/models/*.litertlm

@@ -11,3 +11,13 @@ Future<bool> checkWebGPUSupport() async {
     return false;
   }
 }
+Future<bool> checkFileExists(String url) async {
+  try {
+    final exists = await js_util.promiseToFuture(
+      js_util.callMethod(js_util.globalThis, 'checkFileExists', [url]),
+    );
+    return exists == true;
+  } catch (e) {
+    return false;
+  }
+}

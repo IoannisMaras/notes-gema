@@ -27,7 +27,7 @@
 
 ```html
 <script type="module">
-  import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.27';
+  import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.16';
   window.FilesetResolver = FilesetResolver;
   window.LlmInference = LlmInference;
 </script>
@@ -45,12 +45,28 @@ await FlutterGemma.initialize(webStorageMode: WebStorageMode.streaming);
 
 ## Αντιμετώπιση Προβλημάτων WebGPU
 
-Αν λάβετε σφάλμα σχετικά με τον "GPU Adapter", ακολουθήστε τα εξής βήματα:
+Αν ο Chrome αναφέρει σφάλμα "Failed to request adapter" ή η εφαρμογή δεν μπορεί να χρησιμοποιήσει την κάρτα γραφικών, ακολουθήστε τα παρακάτω βήματα για να ρυθμίσετε σωστά το περιβάλλον σας:
 
-1.  **Chrome Flags**: Ανοίξτε το `chrome://flags` και ενεργοποιήστε τα:
-    *   `#enable-unsafe-webgpu` -> **Enabled**
-    *   `#ignore-gpu-blocklist` -> **Enabled**
-2.  **Hardware Acceleration**: Στις ρυθμίσεις του Chrome (`chrome://settings/system`), βεβαιωθείτε ότι το **"Use graphics acceleration when available"** είναι ενεργό.
-3.  **Secure Context**: Η εφαρμογή απαιτεί `localhost` ή `https://`.
+### 1. Ενεργοποίηση Hardware Acceleration (Το πιο πιθανό)
+Πολλές φορές το WebGPU απενεργοποιείται αν η επιτάχυνση υλικού είναι κλειστή:
+- Πηγαίνετε στις ρυθμίσεις: `chrome://settings/system`
+- Βεβαιωθείτε ότι το **"Use hardware acceleration when available"** είναι **ON**.
+- Πατήστε **Relaunch** για επανεκκίνηση του προγράμματος περιήγησης.
 
-Το σύστημα πλέον διαθέτει αυτόματη μετάπτωση σε **CPU (XNNPACK)** αν η κάρτα γραφικών δεν είναι διαθέσιμη, ώστε να αποφεύγεται η κατάρρευση της εφαρμογής, αν και η ταχύτητα θα είναι σημαντικά χαμηλότερη.
+### 2. Ρύθμιση μέσω Flags
+Αν το παραπάνω είναι ήδη ON, δοκιμάστε να αναγκάσετε τον Chrome να ενεργοποιήσει το WebGPU:
+- Πηγαίνετε στη διεύθυνση: `chrome://flags`
+- Αναζητήστε το **"Enabling WebGPU"** και θέστε το σε **Enabled**.
+- Αναζητήστε το **"Enabling unsafe WebGPU"** (σε μερικές περιπτώσεις χρειάζεται για testing ή παλαιότερο hardware) και θέστε το σε **Enabled**.
+- Πατήστε **Relaunch**.
+
+### 3. Έλεγχος Κατάστασης (chrome://gpu)
+Μπορείτε να δείτε την ακριβή αιτία του προβλήματος πληκτρολογώντας: `chrome://gpu` στην μπάρα διευθύνσεων.
+- Αναζητήστε τη γραμμή **WebGPU**. 
+- Αν αναφέρει "Disabled" ή "Software only", τότε ο Chrome μπλοκάρει την πρόσβαση για λόγους ασφαλείας, ασυμβατότητας drivers ή έλλειψης hardware acceleration.
+
+### 4. Ασφαλές Περιβάλλον (Secure Context)
+Το WebGPU απαιτεί η εφαρμογή να εκτελείται σε ασφαλές περιβάλλον. Αυτό σημαίνει είτε σε `localhost` (για development) είτε μέσω **HTTPS** (για production).
+
+> [!TIP]
+> Το σύστημα πλέον διαθέτει αυτόματη μετάπτωση σε **CPU (XNNPACK)** αν η κάρτα γραφικών δεν είναι διαθέσιμη. Αν δείτε το μήνυμα `GPU ENGAGEMENT FAILED`, η εφαρμογή θα συνεχίσει να λειτουργεί χρησιμοποιώντας τον επεξεργαστή, αν και η ταχύτητα απόκρισης του AI θα είναι χαμηλότερη.

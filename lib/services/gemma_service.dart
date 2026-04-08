@@ -133,22 +133,47 @@ class GemmaService {
     required VoidCallback removeLastLog,
   }) async {
     try {
-      final model = await FlutterGemma.getActiveModel(
+      final modelService = ModelStatusService.instance;
+      
+      var model = await FlutterGemma.getActiveModel(
         maxTokens: 8192,
-        preferredBackend: ModelStatusService.instance.useGpu 
+        preferredBackend: modelService.useGpu 
             ? PreferredBackend.gpu 
             : PreferredBackend.cpu,
         supportAudio: true,
       );
 
       if (_chatSession == null) {
-        _chatSession = await model.createChat(
-          supportsFunctionCalls: true,
-          supportAudio: true,
-          tools: _tools,
-          systemInstruction: _roleInstructions,
-          isThinking: true,
-        );
+        try {
+          _chatSession = await model.createChat(
+            supportsFunctionCalls: true,
+            supportAudio: true,
+            tools: _tools,
+            systemInstruction: _roleInstructions,
+            isThinking: true,
+          );
+        } catch (e) {
+          final errorStr = e.toString().toLowerCase();
+          // If we fail on GPU, force CPU and retry once
+          if (modelService.useGpu && (errorStr.contains('gpu') || errorStr.contains('adapter') || errorStr.contains('webgpu'))) {
+            onLog('> GPU ENGAGEMENT FAILED. ENGAGING CPU XNNPACK...');
+            modelService.forceCpu();
+            model = await FlutterGemma.getActiveModel(
+              maxTokens: 8192,
+              preferredBackend: PreferredBackend.cpu,
+              supportAudio: true,
+            );
+            _chatSession = await model.createChat(
+              supportsFunctionCalls: true,
+              supportAudio: true,
+              tools: _tools,
+              systemInstruction: _roleInstructions,
+              isThinking: true,
+            );
+          } else {
+            rethrow;
+          }
+        }
         _contextSent = false;
       }
 
