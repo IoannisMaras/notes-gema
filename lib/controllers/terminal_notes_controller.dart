@@ -16,12 +16,12 @@ class TerminalNotesController extends TextEditingController {
         lineStyle = lineStyle.copyWith(
           color: Colors.redAccent,
           decoration: TextDecoration.lineThrough,
-          backgroundColor: Colors.redAccent.withOpacity(0.1),
+          backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
         );
       } else if (line.startsWith('+ ')) {
         lineStyle = lineStyle.copyWith(
           color: Colors.greenAccent,
-          backgroundColor: Colors.greenAccent.withOpacity(0.1),
+          backgroundColor: Colors.greenAccent.withValues(alpha: 0.1),
         );
       } else if (line.startsWith('@@')) {
         lineStyle = lineStyle.copyWith(
