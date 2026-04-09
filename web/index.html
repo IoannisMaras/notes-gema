@@ -34,15 +34,40 @@
 </head>
 <body>
   <script type="module">
-    import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.20';
+    import { FilesetResolver, LlmInference } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.16';
     window.FilesetResolver = FilesetResolver;
     window.LlmInference = LlmInference;
 
-    // FORCE VERSION INTERCEPTOR (0.10.20): 
+    // FORCE VERSION INTERCEPTOR (0.10.16): 
     const originalForGenAiTasks = window.FilesetResolver.forGenAiTasks;
     window.FilesetResolver.forGenAiTasks = async function(workerPath) {
-      console.log("[SYSTEM] Forcing GenAI Task Resolver to version 0.10.20...");
-      return await originalForGenAiTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.20/wasm");
+      console.log("[SYSTEM] Forcing GenAI Task Resolver to version 0.10.16...");
+      return await originalForGenAiTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.16/wasm");
+    };
+
+    // LLM INFERENCE INTERCEPTOR: Force CPU if needed
+    const originalCreateFromOptions = window.LlmInference.createFromOptions;
+    window.LlmInference.createFromOptions = function(fileset, options) {
+      console.log("[SYSTEM] MediaPipe: createFromOptions called.", options);
+      if (window._FORCE_CPU) {
+        console.log("[SYSTEM] MediaPipe Override: Detected _FORCE_CPU = true. Force-setting device to CPU.");
+        if (!options.deviceOptions) options.deviceOptions = {};
+        options.deviceOptions.device = 'CPU';
+      }
+      return originalCreateFromOptions.call(window.LlmInference, fileset, options);
+    };
+
+    const originalCreateFromModelPath = window.LlmInference.createFromModelPath;
+    window.LlmInference.createFromModelPath = function(fileset, modelPath) {
+       console.log("[SYSTEM] MediaPipe: createFromModelPath called for " + modelPath);
+       if (window._FORCE_CPU) {
+          console.log("[SYSTEM] Re-routing createFromModelPath to createFromOptions to force CPU.");
+          return window.LlmInference.createFromOptions(fileset, {
+             baseOptions: { modelAssetPath: modelPath },
+             deviceOptions: { device: 'CPU' }
+          });
+       }
+       return originalCreateFromModelPath.call(window.LlmInference, fileset, modelPath);
     };
 
     // Helper to clear the local OPFS storage if the model is corrupted or mismatched
@@ -61,58 +86,142 @@
       return false;
     };
     
-    // Proactive safety: many browsers have navigator.gpu but return a null adapter 
-    // or lack the requestAdapterInfo method, causing the flutter_gemma plugin to crash
-    // during initialization or logging.
+    // Proactive safety and proactive CPU forcing
+    window._FORCE_CPU = false;
+    
+    // Check persistent user preference (set from Control Panel)
+    if (localStorage.getItem('NOTES_GEMA_GPU_ENABLED') === 'false') {
+       window._FORCE_CPU = true;
+       console.log("[SYSTEM] User preference: WebGPU manually disabled.");
+    }
+
     if (navigator.gpu) {
+      console.log("[SYSTEM] Shimming navigator.gpu...");
       const originalRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+      
+      const createAdapterStub = (reason) => {
+        console.log(`[SYSTEM] Creating adapter stub (Reason: ${reason})`);
+        
+        const safeLimits = {
+          maxBufferSize: 1024 * 1024 * 1024,
+          maxStorageBufferBindingSize: 1024 * 1024 * 1024,
+          maxComputeWorkgroupStorageSize: 32768,
+          maxComputeInvocationsPerWorkgroup: 256,
+        };
+
+        const safeFeatures = {
+          has: () => false,
+          keys: () => ({ [Symbol.iterator]: function*(){} }),
+          entries: () => ({ [Symbol.iterator]: function*(){} }),
+          forEach: () => {}
+        };
+
+        const info = { device: "none", architecture: "none", vendor: "none", description: reason, isStub: true };
+        
+        const stub = {
+          requestAdapterInfo: async () => info,
+          requestDevice: async () => null, 
+          features: safeFeatures,
+          limits: safeLimits,
+          adapterInfo: info,
+          isStub: true
+        };
+        
+        return new Proxy(stub, {
+          get(target, prop) {
+            return target[prop];
+          },
+          set(target, prop, value) {
+            console.log(`[SYSTEM] Adapter Stub intercepting SET: ${String(prop)}`);
+            target[prop] = value;
+            return true;
+          }
+        });
+      };
+
       navigator.gpu.requestAdapter = async function(options) {
+        if (window._FORCE_CPU) {
+          return createAdapterStub("force-cpu-stub");
+        }
+
         try {
-          let adapter = await originalRequestAdapter(options);
+          const adapter = await originalRequestAdapter(options);
           
           if (!adapter) {
-            console.warn("[SYSTEM] WebGPU adapter is null. Providing a safety stub to prevent crashes.");
-            // Return a minimal stub that satisfies the plugin's logging/info requirements
-            return {
-              requestAdapterInfo: async () => ({ device: "none", architecture: "none", vendor: "none", description: "safety-stub" }),
-              requestDevice: async () => { throw new Error("WebGPU not available on this hardware."); },
-              features: { has: () => false },
-              limits: {}
-            };
+            console.warn("[SYSTEM] WebGPU original adapter is null. Providing a safety stub.");
+            return createAdapterStub("safety-stub");
           }
           
-          if (!adapter.requestAdapterInfo) {
-            adapter.requestAdapterInfo = async () => ({ device: "unknown", architecture: "unknown", vendor: "unknown", description: "shim" });
+          // Proactive limit check
+          if (adapter.limits && adapter.limits.maxBufferSize < 524550144) {
+             console.warn("[SYSTEM] Proactive limit check: maxBufferSize too low. Requesting CPU fallback.");
+             window._FORCE_CPU = true;
+             return createAdapterStub("limit-fallback-stub");
           }
-          return adapter;
+
+          // Return a proxy of the real adapter so we can safely add properties like adapterInfo if needed
+          const shadowProps = {};
+          return new Proxy(adapter, {
+            get(target, prop) {
+              if (prop in shadowProps) return shadowProps[prop];
+              
+              const val = target[prop];
+              if (typeof val === 'function') return val.bind(target);
+              
+              // Polyfill requestAdapterInfo if missing
+              if (prop === 'requestAdapterInfo' && !target[prop]) {
+                return async () => ({ device: "unknown", architecture: "unknown", vendor: "unknown", description: "shim" });
+              }
+              return val;
+            },
+            set(target, prop, value) {
+              try {
+                target[prop] = value;
+              } catch (e) {
+                console.warn(`[SYSTEM] Failed to set ${String(prop)} on real adapter, using shadow storage.`);
+                shadowProps[prop] = value;
+              }
+              return true;
+            }
+          });
         } catch (e) {
           console.warn("[SYSTEM] navigator.gpu.requestAdapter threw an error:", e);
-          return null; 
+          return createAdapterStub("error-safety-stub");
         }
       };
     }
 
     // Add a helper to check for WebGPU support
     window.isWebGPUSupported = async function() {
-      console.log("[SYSTEM] Checking WebGPU requirements...");
+      console.log("[SYSTEM] Probing GPU capabilities...");
       
       if (!navigator.gpu) {
-        console.log("[SYSTEM] WebGPU not supported: navigator.gpu is undefined.");
-        return false;
+        return { supported: false, reason: "navigator.gpu undefined" };
       }
       
+      if (window._FORCE_CPU) return { supported: false, reason: "Manual CPU force active" };
+
       try {
         const adapter = await navigator.gpu.requestAdapter();
-        if (!adapter) {
-          console.log("[SYSTEM] WebGPU not supported: Failed to request adapter.");
-          return false;
+        if (!adapter || window._FORCE_CPU) {
+          return { supported: false, reason: "Adapter request failed" };
         }
-        
-        console.log("[SYSTEM] WebGPU validation successful.");
-        return true;
+
+        let info = { vendor: "unknown", architecture: "unknown", device: "unknown", description: "unknown" };
+        try { info = await adapter.requestAdapterInfo(); } catch (e) {
+          // Fallback if requestAdapterInfo fails but we have a shimmed info
+          if (adapter.adapterInfo) info = adapter.adapterInfo;
+        }
+
+        if (info.description.includes("stub") || info.description.toLowerCase().includes("swiftshader")) {
+          return { supported: false, reason: "Software rendering or fallback stub detected", info: info };
+        }
+
+        console.log("[SYSTEM] WebGPU Validation Successful!");
+        return { supported: true, info: info };
       } catch (e) {
-        console.log("[SYSTEM] WebGPU error during check:", e);
-        return false;
+        console.error("[SYSTEM] WebGPU probe failed with error:", e);
+        return { supported: false, reason: e.toString() };
       }
     };
 

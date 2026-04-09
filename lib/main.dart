@@ -4,6 +4,10 @@ import 'app.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await FlutterGemma.initialize(webStorageMode: WebStorageMode.streaming);
+  try {
+    await FlutterGemma.initialize(webStorageMode: WebStorageMode.streaming);
+  } catch (e) {
+    debugPrint('[SYSTEM] FlutterGemma.initialize failed: $e');
+  }
   runApp(const MyApp());
 }

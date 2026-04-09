@@ -18,6 +18,8 @@ class ModelStatusService extends ChangeNotifier {
   String _statusMessage = '> init system...';
   String? _errorMessage;
   bool _useGpu = true;
+  bool _isGpuEnabledByUser = getGpuPreference();
+  GpuSupportInfo? _gpuInfo;
 
   ModelStatus get status => _status;
   double get downloadProgress => _downloadProgress;
@@ -25,6 +27,14 @@ class ModelStatusService extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   bool get isReady => _status == ModelStatus.ready;
   bool get useGpu => _useGpu;
+  bool get isGpuEnabledByUser => _isGpuEnabledByUser;
+  GpuSupportInfo? get gpuInfo => _gpuInfo;
+
+  void toggleGpu(bool value) {
+    _isGpuEnabledByUser = value;
+    saveGpuPreference(value);
+    notifyListeners();
+  }
 
   static const _remoteModelUrl =
       'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm';
@@ -37,6 +47,7 @@ class ModelStatusService extends ChangeNotifier {
   void forceCpu() {
     if (_useGpu) {
       _useGpu = false;
+      setForceCpu(true);
       _statusMessage = '> emergency fallback: CPU engagement active.';
       notifyListeners();
     }
@@ -69,10 +80,18 @@ class ModelStatusService extends ChangeNotifier {
 
       // 1. Check WebGPU support before proceeding (only on Web)
       if (kIsWeb) {
-        try {
-          _useGpu = await checkWebGPUSupport();
-        } catch (e) {
+        if (!_isGpuEnabledByUser) {
           _useGpu = false;
+          setForceCpu(true);
+        } else {
+          try {
+            _gpuInfo = await checkWebGPUSupport();
+            _useGpu = _gpuInfo?.supported ?? false;
+            setForceCpu(!_useGpu);
+          } catch (e) {
+            _useGpu = false;
+            setForceCpu(true);
+          }
         }
       }
 
@@ -121,6 +140,7 @@ class ModelStatusService extends ChangeNotifier {
         // Final ultimate fallback
         if (_useGpu) {
           _useGpu = false;
+          setForceCpu(true);
           _update(ModelStatus.initializing, '> engine fallback: switching to CPU...');
           await FlutterGemma.getActiveModel(
             maxTokens: 8192,

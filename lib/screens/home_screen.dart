@@ -3,6 +3,7 @@ import '../models/note.dart';
 import '../services/notes_service.dart';
 import '../services/model_status_service.dart';
 import 'notes_screen.dart';
+import 'control_panel_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -71,8 +72,14 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             _drawerItem(Icons.terminal, 'TERMINAL_SESSION', () => Navigator.pop(context)),
-            _drawerItem(Icons.memory, 'RESOURCE_MONITOR', () {}),
-            _drawerItem(Icons.settings, 'SYS_CONFIG', () {}),
+            _drawerItem(Icons.memory, 'RESOURCE_MONITOR', () {
+              Navigator.pop(context);
+              Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ControlPanelScreen()));
+            }),
+            _drawerItem(Icons.settings, 'SYS_CONFIG', () {
+              Navigator.pop(context);
+              Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ControlPanelScreen()));
+            }),
             const Spacer(),
             Padding(
               padding: const EdgeInsets.all(16.0),
@@ -87,6 +94,12 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('root@gemma:~# ls -l ./notes'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.settings, color: Colors.white54, size: 20),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const ControlPanelScreen()),
+            ),
+          ),
           _statusPill(context),
         ],
       ),
