@@ -416,6 +416,10 @@ class _NotesScreenState extends State<NotesScreen> {
                   },
                   child: SuperEditor(
                     editor: _editor,
+                    componentBuilders: [
+                      _FileImageComponentBuilder(_editor),
+                      ...defaultComponentBuilders,
+                    ],
                     stylesheet: defaultStylesheet.copyWith(
                       addRulesAfter: [
                         StyleRule(BlockSelector.all, (doc, node) {
@@ -526,6 +530,344 @@ class _NotesScreenState extends State<NotesScreen> {
             targetX: _getCursorX(),
             targetY: _getCursorY(),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class CustomImageComponentViewModel extends ImageComponentViewModel {
+  CustomImageComponentViewModel({
+    required super.nodeId,
+    required super.imageUrl,
+    super.expectedSize,
+    super.selection,
+    super.selectionColor = Colors.transparent,
+    this.width,
+    this.height,
+    this.alignment,
+  });
+
+  double? width;
+  double? height;
+  String? alignment;
+
+  @override
+  CustomImageComponentViewModel copy() {
+    return CustomImageComponentViewModel(
+      nodeId: nodeId,
+      imageUrl: imageUrl,
+      expectedSize: expectedSize,
+      selection: selection,
+      selectionColor: selectionColor,
+      width: width,
+      height: height,
+      alignment: alignment,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      super == other &&
+          other is CustomImageComponentViewModel &&
+          width == other.width &&
+          height == other.height &&
+          alignment == other.alignment;
+
+  @override
+  int get hashCode => Object.hash(super.hashCode, width, height, alignment);
+}
+
+class _FileImageComponentBuilder implements ComponentBuilder {
+  const _FileImageComponentBuilder(this.editor);
+  final Editor editor;
+
+  @override
+  SingleColumnLayoutComponentViewModel? createViewModel(Document document, DocumentNode node) {
+    if (node is! ImageNode) return null;
+
+    final w = node.metadata['width'] as double?;
+    final h = node.metadata['height'] as double?;
+    final align = node.metadata['alignment'] as String? ?? 'center';
+
+    return CustomImageComponentViewModel(
+      nodeId: node.id,
+      imageUrl: node.imageUrl,
+      expectedSize: node.expectedBitmapSize,
+      width: w,
+      height: h,
+      alignment: align,
+    );
+  }
+
+  @override
+  Widget? createComponent(
+      SingleColumnDocumentComponentContext componentContext, SingleColumnLayoutComponentViewModel componentViewModel) {
+    if (componentViewModel is! CustomImageComponentViewModel) return null;
+
+    final imageWidget = (BuildContext context, String imageUrl) {
+      if (imageUrl.startsWith('/data/') || imageUrl.startsWith('file://') || imageUrl.startsWith('/storage/')) {
+        final path = imageUrl.replaceFirst('file://', '');
+        return Image.file(File(path), fit: BoxFit.fill);
+      }
+      return Image.network(imageUrl, fit: BoxFit.fill);
+    };
+
+    return _ResizableImageWidget(
+      componentKey: componentContext.componentKey,
+      editor: editor,
+      nodeId: componentViewModel.nodeId,
+      imageUrl: componentViewModel.imageUrl,
+      initialWidth: componentViewModel.width ?? 300.0,
+      initialHeight: componentViewModel.height ?? 200.0,
+      alignment: componentViewModel.alignment ?? 'left',
+      selection: componentViewModel.selection?.nodeSelection as UpstreamDownstreamNodeSelection?,
+      selectionColor: componentViewModel.selectionColor,
+      imageBuilder: imageWidget,
+    );
+  }
+}
+
+class _ResizableImageWidget extends StatefulWidget {
+  final GlobalKey componentKey;
+  final Editor editor;
+  final String nodeId;
+  final String imageUrl;
+  final double initialWidth;
+  final double initialHeight;
+  final String? alignment;
+  final UpstreamDownstreamNodeSelection? selection;
+  final Color selectionColor;
+  final Widget Function(BuildContext, String) imageBuilder;
+
+  const _ResizableImageWidget({
+    Key? key,
+    required this.componentKey,
+    required this.editor,
+    required this.nodeId,
+    required this.imageUrl,
+    required this.initialWidth,
+    required this.initialHeight,
+    required this.alignment,
+    required this.selection,
+    required this.selectionColor,
+    required this.imageBuilder,
+  }) : super(key: key);
+
+  @override
+  State<_ResizableImageWidget> createState() => _ResizableImageWidgetState();
+}
+
+class _ResizableImageWidgetState extends State<_ResizableImageWidget> {
+  late double _width;
+  late double _height;
+  double _dragDeltaY = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _width = widget.initialWidth;
+    _height = widget.initialHeight;
+  }
+
+  void _updateAlignment(String alignment) {
+    final node = widget.editor.document.getNodeById(widget.nodeId);
+    if (node is ImageNode) {
+      final newMetadata = Map<String, dynamic>.from(node.metadata);
+      newMetadata['alignment'] = alignment;
+      widget.editor.execute([
+        ReplaceNodeRequest(
+          existingNodeId: widget.nodeId,
+          newNode: ImageNode(
+            id: widget.nodeId,
+            imageUrl: node.imageUrl,
+            expectedBitmapSize: node.expectedBitmapSize,
+            altText: node.altText,
+            metadata: newMetadata,
+          ),
+        )
+      ]);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    AlignmentGeometry alignGeometry;
+    switch (widget.alignment) {
+      case 'left':
+        alignGeometry = Alignment.centerLeft;
+        break;
+      case 'right':
+        alignGeometry = Alignment.centerRight;
+        break;
+      case 'center':
+      default:
+        alignGeometry = Alignment.center;
+    }
+    
+    final bool isSelected = widget.selection != null;
+
+    return BoxComponent(
+      key: widget.componentKey,
+      child: Container(
+        width: double.infinity,
+        alignment: alignGeometry,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            GestureDetector(
+              onTap: () {
+                // Explicitly select the image node native to SuperEditor on tap
+                widget.editor.execute([
+                  ChangeSelectionRequest(
+                    DocumentSelection(
+                      base: DocumentPosition(
+                        nodeId: widget.nodeId,
+                        nodePosition: const UpstreamDownstreamNodePosition.upstream(),
+                      ),
+                      extent: DocumentPosition(
+                        nodeId: widget.nodeId,
+                        nodePosition: const UpstreamDownstreamNodePosition.downstream(),
+                      ),
+                    ),
+                    SelectionChangeType.placeCaret,
+                    SelectionReason.userInteraction,
+                  )
+                ]);
+              },
+              child: Container(
+                width: _width,
+                height: _height,
+                decoration: BoxDecoration(
+                  border: isSelected ? Border.all(color: Colors.blueAccent, width: 2) : null,
+                ),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    widget.imageBuilder(context, widget.imageUrl),
+                    if (isSelected)
+                      Container(color: widget.selectionColor.withOpacity(0.3)), // Native-like selection tint
+                  ],
+                ),
+              ),
+            ),
+            if (isSelected) ...[
+                Positioned(
+                  right: -10,
+                  bottom: -10,
+                  child: GestureDetector(
+                    onPanUpdate: (details) {
+                      setState(() {
+                        _width = (_width + details.delta.dx).clamp(50.0, 800.0);
+                        _height = (_height + details.delta.dy).clamp(50.0, 800.0);
+                      });
+                    },
+                    onPanEnd: (_) {
+                      final node = widget.editor.document.getNodeById(widget.nodeId);
+                      if (node is ImageNode) {
+                        final newMetadata = Map<String, dynamic>.from(node.metadata);
+                        newMetadata['width'] = _width;
+                        newMetadata['height'] = _height;
+                        widget.editor.execute([
+                          ReplaceNodeRequest(
+                            existingNodeId: widget.nodeId,
+                            newNode: ImageNode(
+                              id: widget.nodeId,
+                              imageUrl: node.imageUrl,
+                              expectedBitmapSize: node.expectedBitmapSize,
+                              altText: node.altText,
+                              metadata: newMetadata,
+                            ),
+                          )
+                        ]);
+                      }
+                    },
+                    child: Container(
+                      width: 20,
+                      height: 20,
+                      decoration: const BoxDecoration(
+                        color: Colors.blueAccent,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.open_in_full, size: 12, color: Colors.white),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: -30,
+                  right: 0,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(4)
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        GestureDetector(
+                          onPanUpdate: (details) {
+                            _dragDeltaY += details.delta.dy;
+                            if (_dragDeltaY.abs() > 40) {
+                              final nodeIndex = widget.editor.document.getNodeIndexById(widget.nodeId);
+                              if (_dragDeltaY > 0 && nodeIndex < widget.editor.document.nodeCount - 1) {
+                                widget.editor.execute([
+                                  MoveNodeRequest(nodeId: widget.nodeId, newIndex: nodeIndex + 1)
+                                ]);
+                                _dragDeltaY -= 40;
+                              } else if (_dragDeltaY < 0 && nodeIndex > 0) {
+                                widget.editor.execute([
+                                  MoveNodeRequest(nodeId: widget.nodeId, newIndex: nodeIndex - 1)
+                                ]);
+                                _dragDeltaY += 40;
+                              } else {
+                                _dragDeltaY = 0;
+                              }
+                            }
+                          },
+                          onPanEnd: (_) => _dragDeltaY = 0,
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 4),
+                            child: Icon(Icons.drag_indicator, size: 20, color: Colors.blueAccent),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          icon: const Icon(Icons.align_horizontal_left, size: 20, color: Colors.white),
+                          onPressed: () {
+                             _updateAlignment('left');
+                             setState(() {});
+                          },
+                        ),
+                        const SizedBox(width: 12),
+                        IconButton(
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          icon: const Icon(Icons.align_horizontal_center, size: 20, color: Colors.white),
+                          onPressed: () {
+                             _updateAlignment('center');
+                             setState(() {});
+                          },
+                        ),
+                        const SizedBox(width: 12),
+                        IconButton(
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          icon: const Icon(Icons.align_horizontal_right, size: 20, color: Colors.white),
+                          onPressed: () {
+                             _updateAlignment('right');
+                             setState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ],
         ),
       ),
     );
