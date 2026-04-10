@@ -5,17 +5,17 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:super_editor/super_editor.dart'; // NEW IMPORT
 
 import '../models/note.dart';
 import '../models/pending_change.dart';
 import '../models/voice_message.dart';
-import 'package:file_picker/file_picker.dart';
 import '../services/gemma_service.dart';
 import '../services/model_status_service.dart';
 import '../services/notes_service.dart';
 import '../widgets/ai_chat_panel.dart';
 import '../widgets/ascii_bot.dart';
-import '../widgets/terminal_notes_controller.dart';
 
 class NotesScreen extends StatefulWidget {
   final Note note;
@@ -26,8 +26,12 @@ class NotesScreen extends StatefulWidget {
 }
 
 class _NotesScreenState extends State<NotesScreen> {
+  // ── Super Editor Controllers ───────────────────────────────────────────────
+  late MutableDocument _doc;
+  late Editor _editor;
+  late MutableDocumentComposer _composer;
+
   // ── Controllers & services ─────────────────────────────────────────────────
-  final TerminalNotesController _noteController = TerminalNotesController();
   final TextEditingController _cmdController = TextEditingController();
   final FocusNode _cmdFocusNode = FocusNode();
   final ScrollController _chatScrollController = ScrollController();
@@ -56,10 +60,24 @@ class _NotesScreenState extends State<NotesScreen> {
   @override
   void initState() {
     super.initState();
-    _noteController.text = widget.note.content;
-    _noteController.addListener(_onNoteChanged);
+
+    // Initialize Super Editor Document
+    _doc = _createInitialDocument();
+    _composer = MutableDocumentComposer(); // <-- CHANGED
+
+    // Use the standard factory instead of the raw Editor constructor
+    _editor = createDefaultDocumentEditor(
+      // <-- CHANGED
+      document: _doc,
+      composer: _composer,
+    );
+
+    // Listen for changes to save the note
+    _doc.addListener(_onNoteChanged);
+
     ModelStatusService.instance.addListener(_onModelStatusChanged);
-    // Position the bot bubble at the right-center after layout
+
+    // Position the bot bubble
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         final size = MediaQuery.of(context).size;
@@ -75,8 +93,9 @@ class _NotesScreenState extends State<NotesScreen> {
 
   @override
   void dispose() {
+    _doc.removeListener(_onNoteChanged);
+    _composer.dispose();
     _cmdFocusNode.dispose();
-    _noteController.dispose();
     _cmdController.dispose();
     ModelStatusService.instance.removeListener(_onModelStatusChanged);
     _ampSubscription?.cancel();
@@ -86,11 +105,55 @@ class _NotesScreenState extends State<NotesScreen> {
     super.dispose();
   }
 
-  // ── Note persistence ───────────────────────────────────────────────────────
+  // ── Document Setup & Persistence ───────────────────────────────────────────
 
-  void _onNoteChanged() {
+  MutableDocument _createInitialDocument() {
+    final nodes = <DocumentNode>[];
+
+    // Load existing images if any
+    for (String path in widget.note.imagePaths) {
+      nodes.add(ImageNode(id: Editor.createNodeId(), imageUrl: path));
+    }
+
+    // Load text
+    if (widget.note.content.trim().isNotEmpty) {
+      final lines = widget.note.content.split('\n');
+      for (String line in lines) {
+        nodes.add(
+          ParagraphNode(
+            id: Editor.createNodeId(),
+            text: AttributedText(line), // <-- Removed "text:"
+          ),
+        );
+      }
+    } else {
+      nodes.add(
+        ParagraphNode(
+          id: Editor.createNodeId(),
+          text: AttributedText(""), // <-- Removed "text:"
+        ),
+      );
+    }
+
+    return MutableDocument(nodes: nodes);
+  }
+
+  String _extractTextFromDocument() {
+    final buffer = StringBuffer();
+    for (final node in _doc) {
+      // <-- Removed .nodes
+      if (node is ParagraphNode) {
+        buffer.writeln(node.text.text);
+      }
+    }
+    return buffer.toString().trim();
+  }
+
+  void _onNoteChanged(dynamic event) {
     final note = widget.note;
-    note.content = _noteController.text;
+
+    note.content = _extractTextFromDocument();
+
     final lines = note.content.split('\n');
     if (lines.isNotEmpty && lines.first.trim().isNotEmpty) {
       String firstLine = lines.first.trim();
@@ -101,6 +164,13 @@ class _NotesScreenState extends State<NotesScreen> {
       note.title = 'untitled.txt';
     }
     note.updatedAt = DateTime.now();
+
+    // Save image paths based on current Document state
+    note.imagePaths = _doc
+        .whereType<ImageNode>()
+        .map((n) => n.imageUrl)
+        .toList();
+
     _notesService.saveNote(note);
   }
 
@@ -186,7 +256,6 @@ class _NotesScreenState extends State<NotesScreen> {
   }
 
   void _runCommand({Uint8List? audioBytes, List<double>? recordedAmplitudes}) {
-    // Guard: don't attempt AI commands if model isn't ready
     if (!ModelStatusService.instance.isReady) return;
 
     final cmd = _cmdController.text.trim();
@@ -207,7 +276,7 @@ class _NotesScreenState extends State<NotesScreen> {
       textCommand: cmd,
       audioBytes: audioBytes,
       recordedAmplitudes: recordedAmplitudes,
-      getNoteText: () => _noteController.text,
+      getNoteText: () => _extractTextFromDocument(),
       onLog: (item) => setState(() => _chatLog.add(item)),
       onLogUpdate: (index, item) => setState(() => _chatLog[index] = item),
       onScrollToBottom: _scrollToBottom,
@@ -215,7 +284,6 @@ class _NotesScreenState extends State<NotesScreen> {
       onDone: () {
         if (mounted) {
           setState(() => _isProcessing = false);
-          // Final scroll after UI settles
           Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
         }
       },
@@ -227,6 +295,8 @@ class _NotesScreenState extends State<NotesScreen> {
       }),
     );
   }
+
+  // ── Image Handling ─────────────────────────────────────────────────────────
 
   Future<Directory> _getImageDirectory() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -242,72 +312,70 @@ class _NotesScreenState extends State<NotesScreen> {
       type: FileType.image,
       allowMultiple: false,
     );
-
-    if (result == null || result.files.isEmpty) {
-      return;
-    }
+    if (result == null || result.files.isEmpty) return;
 
     final picked = result.files.first;
-    if (picked.path == null) {
-      return;
-    }
+    if (picked.path == null) return;
 
     final source = File(picked.path!);
     final imagesDir = await _getImageDirectory();
     final destinationPath =
         '${imagesDir.path}/${widget.note.id}_${DateTime.now().millisecondsSinceEpoch}_${picked.name}';
-    final destination = await source.copy(destinationPath);
+    await source.copy(destinationPath);
 
-    setState(() {
-      widget.note.imagePaths = List<String>.from(widget.note.imagePaths)
-        ..add(destination.path);
-      _noteController.text +=
-          '${_noteController.text.isEmpty ? '' : '\n'}![${picked.name}](${destination.path})';
-    });
-    _notesService.saveNote(widget.note);
-  }
+    // Find the current cursor selection index or default to the end of the document
+    int insertIndex = _doc.length;
+    if (_composer.selection != null) {
+      final selectedNode = _doc.getNodeById(_composer.selection!.extent.nodeId);
+      if (selectedNode != null) {
+        insertIndex = _doc.getNodeIndexById(selectedNode.id) + 1;
+      }
+    }
 
-  void _removeImage(int index) {
-    final removedPath = widget.note.imagePaths[index];
-    setState(() {
-      widget.note.imagePaths = List<String>.from(widget.note.imagePaths)
-        ..removeAt(index);
-      _noteController.text = _noteController.text
-          .replaceAll(
-            RegExp(r'!\[.*?\]\(' + RegExp.escape(removedPath) + r'\)'),
-            '',
-          )
-          .trim();
-    });
-    _notesService.saveNote(widget.note);
+    _editor.execute([
+      InsertNodeAtIndexRequest(
+        nodeIndex: insertIndex,
+        newNode: ImageNode(
+          id: Editor.createNodeId(),
+          imageUrl: destinationPath,
+        ),
+      ),
+    ]);
   }
 
   void _onAcceptChange(PendingChange change) {
-    setState(() {
-      if (change.isAppend) {
-        _noteController.text +=
-            (_noteController.text.isEmpty ? '' : '\n') + change.newText;
-      } else {
-        final current = _noteController.text;
-        final target = current.contains(change.oldText)
-            ? change.oldText
-            : change.oldText.trim();
-        if (current.contains(target)) {
-          _noteController.text = current.replaceFirst(target, change.newText);
-        }
-      }
-    });
+    if (change.isAppend) {
+      _editor.execute([
+        InsertNodeAtIndexRequest(
+          nodeIndex: _doc.toList().length, // <-- Fixed nodes.length
+          newNode: ParagraphNode(
+            id: Editor.createNodeId(),
+            text: AttributedText(change.newText), // <-- Removed "text:"
+          ),
+        ),
+      ]);
+    } else {
+      _editor.execute([
+        InsertNodeAtIndexRequest(
+          nodeIndex: _doc.toList().length, // <-- Fixed nodes.length
+          newNode: ParagraphNode(
+            id: Editor.createNodeId(),
+            text: AttributedText(
+              "\n[AI Change]: ${change.newText}",
+            ), // <-- Removed "text:"
+          ),
+        ),
+      ]);
+    }
   }
 
   // ── Bot helpers ────────────────────────────────────────────────────────────
 
-  double _getCursorX() => _noteController.text.isEmpty ? 20 : 100.0;
-
-  double _getCursorY() {
-    if (_noteController.text.isEmpty) return 100;
-    final lines = _noteController.text.split('\n').length;
-    return (lines * 22.0).clamp(50.0, MediaQuery.of(context).size.height - 100);
-  }
+  double _getCursorX() => 100.0;
+  double _getCursorY() => (MediaQuery.of(context).size.height / 2).clamp(
+    50.0,
+    MediaQuery.of(context).size.height - 100,
+  );
 
   void _stopGeneration() {
     _gemmaService.stopGeneration();
@@ -319,12 +387,15 @@ class _NotesScreenState extends State<NotesScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(
+        0xFF1E1E1E,
+      ), // Dark theme to match your original styling
       appBar: AppBar(
         title: Text('root@gemma:~# nano ${widget.note.title}'),
         actions: [
           IconButton(
             icon: const Icon(Icons.image),
-            tooltip: 'Insert image',
+            tooltip: 'Insert image block',
             onPressed: _insertImage,
           ),
         ],
@@ -337,8 +408,30 @@ class _NotesScreenState extends State<NotesScreen> {
         children: [
           Column(
             children: [
-              // Note editor
-              Expanded(child: _buildNoteEditor()),
+              // Super Editor
+              Expanded(
+                child: GestureDetector(
+                  onTap: () {
+                    if (_showAiChat) setState(() => _showAiChat = false);
+                  },
+                  child: SuperEditor(
+                    editor: _editor,
+                    stylesheet: defaultStylesheet.copyWith(
+                      addRulesAfter: [
+                        StyleRule(BlockSelector.all, (doc, node) {
+                          return {
+                            "textStyle": const TextStyle(
+                              color: Colors.white,
+                              fontFamily: 'Courier',
+                              fontSize: 16,
+                            ),
+                          };
+                        }),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
               // Sliding AI panel
               AnimatedSize(
                 duration: const Duration(milliseconds: 300),
@@ -373,91 +466,6 @@ class _NotesScreenState extends State<NotesScreen> {
     );
   }
 
-  Widget _buildNoteEditor() {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        children: [
-          if (widget.note.imagePaths.isNotEmpty)
-            SizedBox(
-              height: 110,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: widget.note.imagePaths.length,
-                itemBuilder: (context, index) {
-                  final path = widget.note.imagePaths[index];
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 12.0),
-                    child: Stack(
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(
-                            File(path),
-                            width: 110,
-                            height: 110,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) =>
-                                Container(
-                                  width: 110,
-                                  height: 110,
-                                  color: Colors.white12,
-                                  alignment: Alignment.center,
-                                  child: const Icon(
-                                    Icons.broken_image,
-                                    color: Colors.white54,
-                                  ),
-                                ),
-                          ),
-                        ),
-                        Positioned(
-                          right: 4,
-                          top: 4,
-                          child: GestureDetector(
-                            onTap: () => _removeImage(index),
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: Colors.black54,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.close,
-                                size: 18,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          Expanded(
-            child: TextField(
-              onTap: () => setState(() => _showAiChat = false),
-              controller: _noteController,
-              maxLines: null,
-              expands: true,
-              style: const TextStyle(
-                color: Colors.white,
-                fontFamily: 'Courier',
-                fontSize: 16,
-              ),
-              decoration: const InputDecoration(
-                border: InputBorder.none,
-                hintText:
-                    '// type your notes here...\n// use the floating robot to interact with AI.',
-                hintStyle: TextStyle(color: Colors.white38),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildBotBubble() {
     return Positioned(
       left: _botLeft,
@@ -470,7 +478,6 @@ class _NotesScreenState extends State<NotesScreen> {
           setState(() {
             _showAiChat = !_showAiChat;
             if (_showAiChat) {
-              // Snap to top-right so the bot sits above the panel
               _botLeft = size.width - bubbleWidth - margin;
               _botTop = margin;
               _cmdFocusNode.requestFocus();
